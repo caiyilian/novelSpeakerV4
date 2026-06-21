@@ -1,10 +1,15 @@
 # write_label.py
 import sys
+import os
 import argparse
 
 # Fix Windows console encoding
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8")
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT_DIR = os.path.dirname(SCRIPT_DIR)
+LABELED_PATH = os.path.join(ROOT_DIR, "data", "labeled.txt")
 
 
 def main():
@@ -21,7 +26,7 @@ def main():
     names = args.name
 
     # 追加到文件，每个名字一行
-    with open("labeled.txt", "a", encoding="utf-8") as f:
+    with open(LABELED_PATH, "a", encoding="utf-8") as f:
         for name in names:
             f.write(name + "\n")
 
