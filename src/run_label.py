@@ -16,11 +16,13 @@
 import sys, io
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
+import sys
 import os
 import re
 import json
 import requests
 import argparse
+import time
 from datetime import datetime
 
 OLLAMA_BASE_URL = "http://172.31.102.237:11434"
@@ -497,7 +499,7 @@ class LabelerAgent:
         self.tool_call_count = 0
     
     def label(self, line_num, dialogue, short_mem_text, long_mem_condensed, long_mem_detailed,
-              char_state_text, navigation_text, scene_summary, round_log):
+              char_state_text, navigation_text, scene_summary, round_log, quiet=False):
         """
         标注一条对话的说话人（无固定上下文，模型必须用工具读取原文）
         返回: (speaker, summary, reason, pec, ec)
@@ -733,10 +735,12 @@ UPDATE character: 说话人.last_seen_line = {line_num}
                     c = func_args.get("count", 10)
                     result = read_novel_lines(s, c)
                     self.tool_call_count += 1
-                    print(f"    🔧 工具调用 #{self.tool_call_count}: read_novel_lines({s}-{s+c-1}) → {len(result)} 字符, pec={pec}, ec={ec}")
+                    if not quiet:
+                        print(f"    🔧 工具调用 #{self.tool_call_count}: read_novel_lines({s}-{s+c-1}) → {len(result)} 字符, pec={pec}, ec={ec}")
                     messages.append({"role": "tool", "content": result})
         else:
-            print(f"    ⚠️ 达到最大工具调用次数 {max_tool_rounds}")
+            if not quiet:
+                print(f"    ⚠️ 达到最大工具调用次数 {max_tool_rounds}")
         
         round_log["tool_calls"] = tool_call_log
         
@@ -825,13 +829,14 @@ class Boss:
         
         return "\n".join(lines)
     
-    def process_one(self, line_num, dialogue, round_log):
+    def process_one(self, line_num, dialogue, round_log, quiet=False):
         self.round_count += 1
         
-        print(f"\n{'='*60}")
-        print(f"  第 {self.round_count} 轮标注")
-        print(f"  对话：第{line_num}行「{dialogue}」")
-        print(f"{'='*60}")
+        if not quiet:
+            print(f"\n{'='*60}")
+            print(f"  第 {self.round_count} 轮标注")
+            print(f"  对话：第{line_num}行「{dialogue}」")
+            print(f"{'='*60}")
         
         # 1. 获取记忆
         short_mem_text = self.short_mem.get_summary()
@@ -856,11 +861,13 @@ class Boss:
         # 3. 调用 Labeler
         speaker, summary, reason_text, pec, ec = self.labeler.label(
             line_num, dialogue, short_mem_text, long_mem_condensed, long_mem_detailed,
-            char_state_text, navigation_text, scene_summary, round_log
+            char_state_text, navigation_text, scene_summary, round_log,
+            quiet=quiet
         )
         self.total_tokens += pec + ec
         
-        print(f"  📝 标注结果: {speaker}")
+        if not quiet:
+            print(f"  📝 标注结果: {speaker}")
         
         # 4. 更新记忆（存原文+理由）
         self.short_mem.update(line_num, dialogue, speaker, reason_text)
@@ -874,9 +881,11 @@ class Boss:
         
         # 6. 检查是否需要压缩长期记忆
         if self.long_mem.should_compress():
-            print(f"  🔄 触发长期记忆压缩...")
+            if not quiet:
+                print(f"  🔄 触发长期记忆压缩...")
             self.long_mem.compress(round_log)
-            print(f"  📝 长期记忆已更新")
+            if not quiet:
+                print(f"  📝 长期记忆已更新")
         
         round_log["result"] = {
             "speaker": speaker,
@@ -988,18 +997,65 @@ def main():
     
     print(f"  本次标注: 第 {start_idx+1} 到 {end_idx} 条（共 {end_idx - start_idx} 条）")
     
+    # 进度显示辅助
+    def fmt_duration(seconds):
+        h = int(seconds // 3600)
+        m = int((seconds % 3600) // 60)
+        s = int(seconds % 60)
+        if h > 0:
+            return f"{h}h{m:02d}m"
+        return f"{m}m{s:02d}s"
+    
+    start_time = time.time()
+    total_rounds = end_idx - start_idx
+    quiet_mode = total_rounds > 20
+    
     boss = Boss(
         short_mem_rounds=args.short_mem,
         long_mem_compress_every=args.long_mem_every
     )
     
+    batch_tool_calls = 0
+    batch_tokens = 0
+    
     for idx in range(start_idx, end_idx):
         line_num, dialogue = dialogues[idx]
         round_log = new_round(idx - start_idx + 1, line_num, dialogue)
-        speaker = boss.process_one(line_num, dialogue, round_log)
+        speaker = boss.process_one(line_num, dialogue, round_log, quiet=quiet_mode)
         write_label(speaker)
-        print(f"  ✅ 已写入: {speaker}")
         log_entry(round_log)
+        
+        # 统计
+        batch_tool_calls += len(round_log.get("tool_calls", []))
+        labeler = round_log.get("agents", {}).get("Labeler", {})
+        batch_tokens += labeler.get("total_tokens", 0)
+        
+        # 进度显示
+        done = idx - start_idx + 1
+        elapsed = time.time() - start_time
+        avg_sec = elapsed / done
+        remaining_sec = avg_sec * (total_rounds - done)
+        
+        # 一行进度，不刷屏
+        if quiet_mode:
+            progress_bar = f"[{'█' * (done * 20 // total_rounds):20s}]"
+            line = (f"\r  {done:>4d}/{total_rounds:<4d} {progress_bar} "
+                    f"L{line_num:<5d} → {speaker:<6s} "
+                    f"⚙{batch_tool_calls:>3d} "
+                    f"TOK{batch_tokens:>8d} "
+                    f"⏱{avg_sec:.0f}s/轮 "
+                    f"已过{fmt_duration(elapsed)} "
+                    f"预计剩余{fmt_duration(remaining_sec)}")
+            sys.stdout.write(line)
+            sys.stdout.flush()
+        else:
+            print(f"  [{done}/{total_rounds}] L{line_num} → {speaker:<6s} | "
+                  f"⚙{batch_tool_calls:>3d} ⏱{avg_sec:.0f}s/avg "
+                  f"已过{fmt_duration(elapsed)} 预计剩余{fmt_duration(remaining_sec)}")
+    
+    # 安静模式结束，换行收尾
+    if quiet_mode:
+        print()
     
     print(f"\n{'='*60}")
     print(f"  标注完成")
