@@ -7,11 +7,16 @@ import sys
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8")
 
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT_DIR = os.path.dirname(SCRIPT_DIR)
+NOVEL_PATH = os.path.join(ROOT_DIR, "data", "novel.txt")
+LABELED_PATH = os.path.join(ROOT_DIR, "data", "labeled.txt")
+
 
 def get_label_count():
-    if not os.path.exists("labeled.txt"):
+    if not os.path.exists(LABELED_PATH):
         return 0
-    with open("labeled.txt", "r", encoding="utf-8") as f:
+    with open(LABELED_PATH, "r", encoding="utf-8") as f:
         count = len(f.readlines())
     return count
 
@@ -38,7 +43,7 @@ def main():
     )
     args = parser.parse_args()
 
-    with open("novel.txt", "r", encoding="utf-8") as f:
+    with open(NOVEL_PATH, "r", encoding="utf-8") as f:
         content = f.read()
 
     dialogues = extract_dialogue_with_line_numbers(content)
@@ -83,15 +88,15 @@ def main():
         line_num, dialogue = batch[0]
         print(f"待标注对话：第{line_num}行「{dialogue}」")
         print()
-        print("请仔细分析 `novel.txt` 中对应行的上下文，判断说话角色。")
-        print("然后调用 python write_label.py --name <角色名>")
+        print("请仔细分析 novel.txt 中对应行的上下文，判断说话角色。")
+        print("然后调用 python src/write_label.py --name <角色名>")
     else:
         # 批量标注模式
         print(f"待标注对话批次（{len(batch)}句）：")
         for i, (line_num, dialogue) in enumerate(batch, 1):
             print(f"{i}. 第{line_num}行：「{dialogue}」")
         print()
-        print("请仔细分析 `novel.txt` 中对应行的上下文，判断每句话的说话角色。")
+        print("请仔细分析 novel.txt 中对应行的上下文，判断每句话的说话角色。")
         print("然后调用 write_label.py --name 角色名1 --name 角色名2 ... 按顺序标注。")
 
 
