@@ -25,10 +25,21 @@ import argparse
 import time
 from datetime import datetime
 
-OLLAMA_BASE_URL = "http://172.31.102.237:11434"
-OLLAMA_MODEL = "qwen3:32b"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(SCRIPT_DIR)
+
+# 从 config/ip_config 读取服务器配置（不暴露 IP 到 GitHub）
+CONFIG_PATH = os.path.join(ROOT_DIR, "config", "ip_config")
+OLLAMA_BASE_URL = "http://localhost:11434"
+OLLAMA_MODEL = "qwen3:32b"
+if os.path.exists(CONFIG_PATH):
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith("OLLAMA_BASE_URL="):
+                OLLAMA_BASE_URL = line.split("=", 1)[1]
+            elif line.startswith("OLLAMA_MODEL="):
+                OLLAMA_MODEL = line.split("=", 1)[1]
 NOVEL_PATH = os.path.join(ROOT_DIR, "data", "novel.txt")
 LABELED_PATH = os.path.join(ROOT_DIR, "data", "labeled.txt")
 ANSWERS_PATH = os.path.join(ROOT_DIR, "data", "answers.txt")
