@@ -176,8 +176,8 @@ class CharacterState:
     结构化角色状态表
     
     维护：
-      - 角色别名映射（赫萝 = 女孩 = 贤狼赫萝），双重确认机制
-      - 角色关系（罗伦斯 ↔ 赫萝：同行）
+      - 角色别名映射（如：真名 = 临时称呼 = 身份称号），双重确认机制
+      - 角色关系（如：主角A 与 主角B：同行/伙伴）
       - 最后出现行号 + 最近对话采样
     """
     
@@ -194,7 +194,14 @@ class CharacterState:
             "pending_aliases": {},  # 待确认的别名映射
         }
     
-    def save(self):
+    def save(self, round_num=0):
+        if round_num > 0 and os.path.exists(STATE_PATH):
+            history_dir = os.path.join(ROOT_DIR, "data", "state_history")
+            os.makedirs(history_dir, exist_ok=True)
+            backup_path = os.path.join(history_dir, f"character_state_round_{round_num:04d}.json")
+            with open(STATE_PATH, "r", encoding="utf-8") as src:
+                with open(backup_path, "w", encoding="utf-8") as dst:
+                    dst.write(src.read())
         with open(STATE_PATH, "w", encoding="utf-8") as f:
             json.dump(self.state, f, ensure_ascii=False, indent=2)
     
@@ -386,7 +393,7 @@ class CharacterState:
 # ============================================================
 
 class ShortMemAgent:
-    def __init__(self, max_rounds=15):
+    def __init__(self, max_rounds=25):
         self.max_rounds = max_rounds
         self.history = []  # [(line_num, dialogue_text, speaker, reason)]
     
@@ -412,7 +419,7 @@ class ShortMemAgent:
 # ============================================================
 
 class LongMemAgent:
-    def __init__(self, compress_every=5):
+    def __init__(self, compress_every=9999):
         self.compress_every = compress_every
         self.compression_count = 0
         self.long_memory_condensed = ""
@@ -492,6 +499,76 @@ class LongMemAgent:
         # 详细版只保留最近1次
         self.long_memory_detailed = detailed
         
+
+# ============================================================
+# FactCurator Agent
+# ============================================================
+
+class FactCurator:
+    def __init__(self, curator_every=10):
+        self.curator_every = curator_every
+        self.curation_count = 0
+        self.pending_rounds = []
+        self.fact_summary = "（暂无角色事实库）"
+    
+    def add_round(self, line_num, speaker, summary):
+        self.pending_rounds.append({"line": line_num, "speaker": speaker, "summary": summary})
+    
+    def should_curate(self):
+        return len(self.pending_rounds) >= self.curator_every
+    
+    def curate(self, short_mem_text, char_state_json, round_log):
+        if not self.pending_rounds:
+            return []
+        summaries = "\n".join([f"#{r['line']}: {r['speaker']} | {r['summary']}" for r in self.pending_rounds])
+        system_prompt = """你是一个角色数据库维护助手（FactCurator）。
+输入：当前角色库 JSON + 近期对话原文和标注摘要
+输出严格 JSON：{"updates":[{"action":"add_character"|"add_alias"|"add_relation"|"none","target":"角色名","evidence_line":行号,"detail":{...}}]}
+规则：每个更新必须引用原文行号；不要编造信息；没有新发现输出 action: "none"。"""
+        user_content = f"""当前角色库：
+{json.dumps(char_state_json, ensure_ascii=False, indent=2)}
+
+近期对话和标注：
+{short_mem_text}
+
+摘要：
+{summaries}
+
+检查是否有新的角色、别名或关系需要记录。没有则输出 action: "none"。"""
+        messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_content}]
+        text, pec, ec, _ = call_ollama(messages, label="FactCurator")
+        log_agent(round_log, "FactCurator", "curator", messages, text, pec, ec)
+        try:
+            json_match = re.search(r'\{[\s\S]*\}', text)
+            if json_match:
+                updates = json.loads(json_match.group()).get("updates", [])
+                summary_lines = ["[角色事实库]"]
+                chars = char_state_json.get("characters", {})
+                if chars:
+                    for name, info in chars.items():
+                        aliases = info.get("aliases", [])
+                        non_self = [a for a in aliases if a != name]
+                        alias_str = f"（也称: {', '.join(non_self)}）" if non_self else ""
+                        last = info.get("last_seen_line", "?")
+                        rels = info.get("relations", {})
+                        rel_str = ""
+                        if rels:
+                            rel_parts = [f"{k}:{v}" for k, v in rels.items()]
+                            rel_str = f" [关系: {', '.join(rel_parts)}]"
+                        summary_lines.append(f"  {name}{alias_str} (最近L{last}){rel_str}")
+                else:
+                    summary_lines.append("  （暂无角色记录）")
+                self.fact_summary = "\n".join(summary_lines)
+                self.pending_rounds = []
+                self.curation_count += 1
+                return updates
+        except:
+            pass
+        self.pending_rounds = []
+        return []
+    
+    def get_summary(self):
+        return self.fact_summary
         self.pending_summaries = []
         self.compression_count += 1
     
@@ -509,7 +586,7 @@ class LabelerAgent:
     def __init__(self):
         self.tool_call_count = 0
     
-    def label(self, line_num, dialogue, short_mem_text, long_mem_condensed, long_mem_detailed,
+    def label(self, line_num, dialogue, short_mem_text, fact_summary, neighbor_context,
               char_state_text, navigation_text, scene_summary, round_log, quiet=False):
         """
         标注一条对话的说话人（无固定上下文，模型必须用工具读取原文）
@@ -556,78 +633,47 @@ class LabelerAgent:
    严格按第五节格式输出，四个标签都必须有。
 
 ======================================================================
-三、系统提供的辅助信息 —— 如何使用（以及如何不盲信）
+三、辅助信息 —— 可信度分级
 ======================================================================
 
-系统会在 User Message 中提供以下几类辅助信息。这些信息来自系统的其他 Agent，
-**不是权威事实。它们可能包含之前轮次标注中的错误。** 你必须保持独立判断。
+系统会在 User Message 中提供辅助信息。不同信息的可信度不同：
 
-【辅助信息 1：原文导航】
-- 格式：目标行附近的行号+内容缩影+（如有）之前的标注结果
-- 作用：让你在调工具之前就有大致局面感知
-- 使用方式：快速参考，但**不完全准确**——标注结果可能是错的
+可直接使用（100% 准确）：
+  - 原文导航中的行号和内容片段（来自 novel.txt）
+  - 短期记忆中的原文对话文本
 
-【辅助信息 2：短期记忆（最近对话历史）】
-- 格式：#行号: 原文对话 → 说话人 + 判断理由
-- 作用：快速了解最近的对话流转
-- 风险：如果前面某轮的标注本身就错了，这个信息就是错的
-- 使用方式：作为快速参考，但你**不必须相信它**。
-  如果你的原文阅读结果与短期记忆矛盾，以原文为准。
+参考使用（以原文验证为准）：
+  - 短期记忆中的说话人标注（以原文叙事标记为最终权威）
+  - 角色事实库中的角色描述
 
-【辅助信息 3：长期记忆】
-- 精简版：角色关系、主线进展、别名映射的概要
-- 详细版：更详细的情节节点、角色描述、别名状态表
-- 风险：压缩过程中可能丢失细节、混淆角色；可能存在过时信息
-- 使用方式：作为背景参考，但不是"标准答案"
-
-【辅助信息 4：角色状态表】
-- 格式：角色名、别名列表、最近出场行号、关系网络、最近对话采样
-- 风险：别名列表可能不完整或包含错误推断；角色可能存在但未被收录
-- 使用方式：作为已知角色的索引。如果原文中出现了一个角色状态表中
-  没有的角色，不要强行套用已有角色——这可能就是一个新出场角色。
-
-**核心原则：原文 > 辅助信息。你的权威来源永远是通过 read_novel_lines 读到的原文。**
+核心原则：原文 > 辅助信息。当原文中的叙事标记与辅助信息冲突时，以原文为准。
 
 ======================================================================
 四、标注规则（详细版）
 ======================================================================
 
-【规则 1：名字粒度 —— 找到具体的名字，但不要超前使用】
-- 如果一个角色在当前上下文中有已知的名字，使用那个名字
-- 如果一个角色在当前上下文中只被称为泛称（如"女孩""商人""骑士"），
-  而你在更后面的行中读到了她的真名，**在当前对话中仍应使用泛称**，
-  因为此刻的叙事视角还不知道真名
-- 例外：如果上下文叙事中已明确使用真名称呼该角色（即使角色自己还没自我介绍），
-  则使用真名
+【规则 1：说话人名称 —— 使用原文中实际出现的称呼】
+- 有具体名字 → 使用具体名字
+- 如果没有姓名但上下文有身份或群体，请用中文身份词，例如：村民、骑士、店员、商人、众人、未知。
+- 不要用临时行为关系替代更稳定身份；例如上下文说明是村落居民时，用"村民"而不是"顾客"。
+- 群体对话（如集体呼喊、众人齐声）也用群体称呼，不要标为"非人物发声"。
+- 临时身份词（如"女孩""少年""老人""大汉"等描述具体个体的称呼）：去后文有限范围搜索稳定姓名或固定称呼，找到则使用
+- 群体称呼（如"村民""骑士""众人""店员"等）：不需要去后文搜索姓名，直接使用该群体称呼即可
+- **搜索阈值：仅对明显是可追踪的具体个体的临时称呼向前搜索，对群体称呼和一次性路人不要无限搜索**
 
-【规则 2：区分叙事声明和角色自称】
-- "XX说道"这类叙事中的称呼是权威的——它在叙述层面确认了说话人
-- 角色自称（"我是XX"）不一定是真的——角色可能在说谎、隐瞒身份
-- 如果叙事和角色自称冲突，以叙事为准
+【规则 2：叙事标记优先于推理】
+- "XX说""XX开口道""XX喊道""XX回答"这类叙事句中的称呼是权威信号，直接确定说话人
+- 对话交替规律只是辅助推测手段，必须让位于叙事标记
+- 同一角色可能连续说多句，不强行假设交替
 
-【规则 3：非人物发声】
-- 内心独白：用「」括起来的角色心理活动 → 标注为"非人物发声"
-- 拟声词：纯拟声 → 标注为"非人物发声"
-- 无法判断是哪个角色说的模糊对话 → 如果你读了很多上下文仍无法确定，
-  标注为"非人物发声"，并在 <reason> 中写明不确定的原因
+【规则 3：非人物发声（仅在以下情况使用）】
+- 环境声、物体声音、心理比喻声或声音效果 → 标注为"非人物发声"
+- 如果文本明确说明某个角色发出该声音（如喊叫、叹息、笑声、嚎叫），仍标注该角色
+- 群体呼喊、集体对话不是"非人物发声"
 
-【规则 4：多人连续对话中的归属判断】
-- 如果 A 和 B 交替说话，且叙事中没有每句都指定说话人：
-  - 看交替规律：如果上一句是 A，下一句大概率是 B 的回应
-  - 看称呼：如果下一句里出现了角色名，说明说话人是另一个人
-  - 看内容逻辑：问句后面是答句，指令后面是服从或反抗
-- 如果交替规律被打断（同一人连续说了两句），叙事中通常会有标记（"他又补充道"）
-
-【规则 5：角色不在场的情况】
-- 如果对话中提到了一个角色的名字，但该角色实际上不在当前场景中，
-  这段对话的说话人不是被提及的那个角色
-- 区分"谁在说话"和"在说谁"
-
-【规则 6：不要编造名字】
-- 你能使用的名字必须是你在原文中实际读到的
-- 如果原文中一个角色只有泛称，不要自己起名字
-- 如果原文中有多个角色使用同样的泛称（如两个"骑士"），
-  尽量从上下文区分，如果无法区分则在 <reason> 中注明不确定性
+【规则 4：角色不在场 / 新角色】
+- 区分"谁在说话"和"在说谁"——对话中提到的角色名未必是说话人
+- 如果出现角色状态表中没有的角色，如实使用原文中的称呼标注
 
 ======================================================================
 五、输出格式（严格遵循）
@@ -659,19 +705,15 @@ UPDATE character: 说话人.last_seen_line = {line_num}
 </state_update>
 
 【state_update 写入规则】
-- last_seen_line 更新：每轮必写，更新本轮说话人的最近出场行号
-- alias 更新：仅在原文中出现明确的身份揭露时写（如"我的名字是XX""咱是XX"）
-  **不要**在仅凭推测时写 alias 更新
-- relation 更新：仅在原文中出现明确的关系陈述时写
-- NEW character：如果本轮发现了一个角色状态表中没有的新角色，声明并给出基本描述"""
+- 仅写角色名，不附加描述"""
         
         user_content = f"""请标注以下对话的说话人：
 
 第{line_num}行：「{dialogue}」
 
 ====================================================================
-以下辅助信息由系统其他 Agent 生成，**仅供参考，可能有误**。
-如果与你的原文阅读结果冲突，**以原文为准，不要盲信**。
+以下辅助信息由系统其他 Agent 生成。原文导航中的行号和内容片段来自小说原文，100% 准确。
+短期记忆中的说话人标注以及角色事实库仅供参考，以你通过 read_novel_lines 读到的原文为准。
 ====================================================================
 
 {scene_summary}
@@ -679,13 +721,12 @@ UPDATE character: 说话人.last_seen_line = {line_num}
 [原文导航 - 目标行附近]
 {navigation_text}
 
+{neighbor_context}
+
 {short_mem_text}
 
-[长期记忆 - 精简版]
-{long_mem_condensed}
-
-[长期记忆 - 详细版]
-{long_mem_detailed}
+[角色事实库]
+{fact_summary}
 
 {char_state_text}
 
@@ -786,10 +827,11 @@ UPDATE character: 说话人.last_seen_line = {line_num}
 # ============================================================
 
 class Boss:
-    def __init__(self, short_mem_rounds=15, long_mem_compress_every=5):
+    def __init__(self, short_mem_rounds=25, long_mem_compress_every=9999, fact_curator_every=10):
         self.labeler = LabelerAgent()
         self.short_mem = ShortMemAgent(max_rounds=short_mem_rounds)
         self.long_mem = LongMemAgent(compress_every=long_mem_compress_every)
+        self.fact_curator = FactCurator(curator_every=fact_curator_every)
         self.char_state = CharacterState()
         self.dialogue_list = get_dialogue_list()
         self.total_tokens = 0
@@ -832,7 +874,7 @@ class Boss:
             
             if ln in labeled_map:
                 sp, reason = labeled_map[ln]
-                lines.append(f"  {marker}L{ln}: 「{dialog_map.get(ln, content[:40])}」→ {sp}")
+                lines.append(f"  {marker}L{ln}: 「{dialog_map.get(ln, content[:40])}»")
             elif "「" in content:
                 lines.append(f"  {marker}L{ln}: 「{content[:50]}」")
             else:
@@ -851,27 +893,28 @@ class Boss:
         
         # 1. 获取记忆
         short_mem_text = self.short_mem.get_summary()
-        long_mem_condensed, long_mem_detailed = self.long_mem.get_memory()
+        fact_summary = self.fact_curator.get_summary()
         char_state_text = self.char_state.get_state_text(current_line=line_num)
         scene_summary = self.char_state.get_scene_summary(current_line=line_num)
         
         # 2. 构建原文导航
         navigation_text = self._build_navigation(line_num, nav_range=20)
+        neighbor_context = ""
         
         # 记录 Boss 任务
         round_log["boss_task"] = {
             "dialogue_line": line_num,
             "dialogue_text": dialogue,
             "short_mem": short_mem_text,
-            "long_mem_condensed": long_mem_condensed,
-            "long_mem_detailed": long_mem_detailed,
+            "fact_summary": fact_summary,
+            "neighbor_context": neighbor_context,
             "char_state": char_state_text,
             "navigation": navigation_text,
         }
         
         # 3. 调用 Labeler
         speaker, summary, reason_text, pec, ec = self.labeler.label(
-            line_num, dialogue, short_mem_text, long_mem_condensed, long_mem_detailed,
+            line_num, dialogue, short_mem_text, fact_summary, neighbor_context,
             char_state_text, navigation_text, scene_summary, round_log,
             quiet=quiet
         )
@@ -885,18 +928,23 @@ class Boss:
         self.long_mem.add_summary(line_num, speaker, summary)
         
         # 5. 更新角色状态
-        self.char_state.update_character(speaker, line_num, dialogue_text=dialogue)
+        if speaker != "非人物发声":
+            self.char_state.update_character(speaker, line_num, dialogue_text=dialogue)
         labeler_response = round_log["agents"].get("Labeler", {}).get("response", "")
         self.char_state.parse_state_update(labeler_response, line_num, dialogue=dialogue)
-        self.char_state.save()
+        self.char_state.save(round_num=self.round_count)
         
-        # 6. 检查是否需要压缩长期记忆
-        if self.long_mem.should_compress():
+        # 6. FactCurator：结构化事实库维护
+        self.fact_curator.add_round(line_num, speaker, summary)
+        if self.fact_curator.should_curate():
             if not quiet:
-                print(f"  🔄 触发长期记忆压缩...")
-            self.long_mem.compress(round_log)
+                print(f"  🔄 触发 FactCurator 角色事实库更新...")
+            fc_mem = self.short_mem.get_summary()
+            char_state_json = self.char_state.state
+            updates = self.fact_curator.curate(fc_mem, char_state_json, round_log)
+            self.char_state.save(round_num=self.round_count)
             if not quiet:
-                print(f"  📝 长期记忆已更新")
+                print(f"  📝 角色事实库已更新")
         
         round_log["result"] = {
             "speaker": speaker,
