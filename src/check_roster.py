@@ -16,12 +16,12 @@ import os
 import re
 import sys
 import argparse
-from pathlib import Path
+from typing import List, Optional, Tuple
 
 # ──────────────────────────── 默认黑名单 ────────────────────────────
 # 不要在这里添加任何新小说的名字！这些只针对当前项目已知的污染。
 # 切换小说时请删除此文件或使用 --roster 参数。
-DEFAULT_ROSTER: list[str] = [
+DEFAULT_ROSTER: List[str] = [
     "赫萝",
     "罗伦斯",
     "马贺特",
@@ -43,7 +43,7 @@ DEFAULT_ROSTER: list[str] = [
 
 # ──────────────────────────── 逻辑 ────────────────────────────
 
-def load_roster(path: str | None) -> list[str]:
+def load_roster(path: Optional[str]) -> List[str]:
     """从文件读取名单，每行一个词；否则使用内置默认名单。"""
     if path is None:
         return DEFAULT_ROSTER
@@ -51,12 +51,12 @@ def load_roster(path: str | None) -> list[str]:
         return [line.strip() for line in f if line.strip()]
 
 
-def scan_py_files(root: str, roster: list[str]) -> list[tuple[str, int, str, str]]:
+def scan_py_files(root: str, roster: List[str]) -> List[Tuple[str, int, str, str]]:
     """扫描目录下所有 .py 文件，返回违规列表。
 
     返回格式: [(文件路径, 行号, 匹配词, 行内容), ...]
     """
-    violations: list[tuple[str, int, str, str]] = []
+    violations: List[Tuple[str, int, str, str]] = []
     pattern = re.compile("|".join(re.escape(word) for word in roster))
 
     for dirpath, _dirnames, filenames in os.walk(root):
