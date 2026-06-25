@@ -22,7 +22,7 @@ KEEP_FILES = {"novel.txt", "answers.txt"}
 
 def main():
     if not os.path.isdir(DATA_DIR):
-        print(f"❌ data/ 目录不存在")
+        print(f"data/ 目录不存在")
         return 1
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -32,7 +32,7 @@ def main():
     moved = 0
     for name in os.listdir(DATA_DIR):
         if name in KEEP_FILES:
-            print(f"  ⏭️  保留: {name}")
+            print(f"  [保留]: {name}")
             continue
 
         src = os.path.join(DATA_DIR, name)
@@ -46,10 +46,10 @@ def main():
         else:
             shutil.move(src, dst)
 
-        print(f"  ✅ 已移动: {name}")
+        print(f"  [已移动]: {name}")
         moved += 1
 
-    print(f"\n🎉 备份完成: {target}")
+    print(f"\n备份完成: {target}")
     print(f"   移动了 {moved} 个文件/文件夹")
     print(f"   data/ 现仅保留: {', '.join(sorted(KEEP_FILES))}")
     return 0
