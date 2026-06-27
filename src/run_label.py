@@ -48,6 +48,7 @@ LABELED_PATH = os.path.join(ROOT_DIR, "data", "labeled.txt")
 ANSWERS_PATH = os.path.join(ROOT_DIR, "data", "answers.txt")
 LOG_PATH = os.path.join(ROOT_DIR, "data", "label_log.jsonl")
 STATE_PATH = os.path.join(ROOT_DIR, "data", "character_state.json")
+VAULT_PATH = os.path.join(ROOT_DIR, "data", "evidence_vault.json")
 
 # Token budget: stop searching when cumulative tokens exceed this
 TOKEN_BUDGET = 18000
@@ -148,6 +149,148 @@ def read_novel_lines(start, count):
     return "\n".join(result)
 
 
+def search_novel(keyword, context_lines=1):
+    """Search novel.txt for a keyword. Returns matching lines with context."""
+    with open(NOVEL_PATH, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    results = []
+    for i, line in enumerate(lines):
+        if keyword in line:
+            ctx_start = max(0, i - context_lines)
+            ctx_end = min(len(lines), i + context_lines + 1)
+            block = []
+            for j in range(ctx_start, ctx_end):
+                marker = ">>>" if j == i else "   "
+                block.append(f"{marker}{j+1}: {lines[j].rstrip()}")
+            results.append("\n".join(block))
+    return "\n---\n".join(results) if results else f"(No matches for '{keyword}')"
+
+
+def get_narrative_before(line_num, max_lines=5):
+    """Extract narrative (non-dialogue) lines before a given line."""
+    with open(NOVEL_PATH, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    narrative = []
+    for i in range(line_num - 2, max(-1, line_num - 2 - max_lines), -1):
+        if i < 0:
+            break
+        text = lines[i].rstrip()
+        if "「" in text:
+            break
+        if text.strip():
+            narrative.insert(0, text.strip())
+    return " | ".join(narrative) if narrative else ""
+
+
+def deep_search_identity(temp_name, around_line, search_forward=200, search_backward=100):
+    """Search for identity clues for a temporary descriptor near a line."""
+    with open(NOVEL_PATH, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    start = max(0, around_line - 1 - search_backward)
+    end = min(len(lines), around_line - 1 + search_forward)
+    intro_patterns = ["我叫", "咱是", "我是", "名字是", "吾乃", "咱的名字是"]
+
+    results = [f"=== Deep identity search for '{temp_name}' near L{around_line} ==="]
+    results.append(f"Range: L{start+1} to L{end} ({end-start} lines)\n")
+
+    intro_matches = []
+    for i in range(start, end):
+        line_text = lines[i]
+        for pat in intro_patterns:
+            if pat in line_text:
+                intro_matches.append((i + 1, line_text.strip()))
+
+    if intro_matches:
+        results.append(f"--- Self-introduction patterns ({len(intro_matches)} matches) ---")
+        for ln, text in intro_matches:
+            rel = ">" if abs(ln - around_line) < 50 else " "
+            results.append(f"  {rel}L{ln}: {text[:100]}")
+
+    temp_matches = []
+    for i in range(start, end):
+        if temp_name in lines[i]:
+            temp_matches.append((i + 1, lines[i].strip()))
+
+    if temp_matches:
+        results.append(f"\n--- '{temp_name}' occurrences ({len(temp_matches)} matches) ---")
+        for ln, text in temp_matches[:15]:
+            results.append(f"  L{ln}: {text[:100]}")
+        if len(temp_matches) > 15:
+            results.append(f"  ... and {len(temp_matches) - 15} more")
+
+    if not intro_matches and not temp_matches:
+        results.append("(No relevant matches found)")
+
+    return "\n".join(results)
+
+
+def find_all_references(name, max_results=10):
+    """Find all occurrences of a name in the novel with context."""
+    with open(NOVEL_PATH, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    results = []
+    count = 0
+    for i, line in enumerate(lines):
+        if name in line:
+            ctx_start = max(0, i - 1)
+            ctx_end = min(len(lines), i + 2)
+            block = []
+            for j in range(ctx_start, ctx_end):
+                marker = ">>>" if j == i else "   "
+                block.append(f"{marker}{j+1}: {lines[j].rstrip()}")
+            results.append("\n".join(block))
+            count += 1
+            if count >= max_results:
+                break
+    return "\n---\n".join(results) if results else f"(No references to '{name}')"
+
+
+def build_context_index(line_num, context_window=40):
+    """Build an abstract map of novel around target line (no full text).
+    Forces the Labeler to use read_novel_lines to see actual content."""
+    with open(NOVEL_PATH, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    start = max(1, line_num - context_window)
+    end = min(len(lines), line_num + context_window)
+    result = []
+    result.append(f"[Novel Map near L{line_num} (read full text with read_novel_lines)]")
+    result.append(f"  -> = target  [D] = has dialogue  [N] = narrative")
+
+    last_type = None
+    block_start = None
+    block_lines = []
+
+    for i in range(start - 1, end):
+        ln = i + 1
+        text = lines[i].rstrip()
+        has_dialogue = "\u300c" in text
+        line_type = "D" if has_dialogue else "N"
+
+        if line_type == "D":
+            if last_type == "N" and block_start is not None:
+                result.append(f"     L{block_start}-L{ln-1} [N] ({len(block_lines)} lines)")
+            marker = "->" if ln == line_num else "  "
+            dlg = re.search(r"\u300c([^\u300d]+)\u300d", text)
+            dlg_text = dlg.group(1)[:40] + "..." if dlg and len(dlg.group(1)) > 40 else (dlg.group(1) if dlg else "")
+            result.append(f"  {marker}L{ln} [D] \u300c{dlg_text}\u300d")
+            last_type = "D"
+            block_start = None
+            block_lines = []
+        else:
+            if last_type != "N":
+                if block_start is not None:
+                    result.append(f"     L{block_start}-L{ln-1} [N] ({len(block_lines)} lines)")
+                block_start = ln
+                block_lines = []
+            block_lines.append(text)
+            last_type = "N"
+
+    if block_start is not None and block_lines:
+        result.append(f"     L{block_start}-L{min(len(lines), end)} [N] ({len(block_lines)} lines)")
+
+    return "\n".join(result)
+
+
 def get_dialogue_list():
     """Extract all dialogues from novel as (line_num, text) pairs."""
     with open(NOVEL_PATH, "r", encoding="utf-8") as f:
@@ -210,6 +353,24 @@ TOOL_READ_NOVEL = {
     }
 }
 
+TOOL_SEARCH_NOVEL = {
+    "type": "function",
+    "function": {
+        "name": "search_novel",
+        "description": "Search the novel text for a keyword or character name. Returns matching lines with surrounding context. Use this to find where a character was introduced, where their name appears, or to confirm identity clues.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "keyword": {"type": "string", "description": "The keyword or character name to search for"},
+                "context_lines": {"type": "integer", "description": "Number of context lines before and after each match (default: 2)"}
+            },
+            "required": ["keyword"]
+        }
+    }
+}
+
+LABELER_TOOLS = [TOOL_READ_NOVEL, TOOL_SEARCH_NOVEL]
+
 
 # ============================================================
 # Character State - clean, validated, no pollution
@@ -259,7 +420,7 @@ class CharacterState:
                     return data
             except (json.JSONDecodeError, KeyError):
                 pass
-        return {"characters": {}, "alias_map": {}}
+        return {"characters": {}, "alias_map": {}, "speech_order": []}
 
     def _is_valid_state(self, data):
         if not isinstance(data, dict):
@@ -271,6 +432,42 @@ class CharacterState:
             if not validate_char_name(name):
                 return False
         return True
+
+    def update_speech_order(self, speaker_name):
+        """Track the order of who spoke, for alternating pattern detection."""
+        cleaned = validate_char_name(speaker_name)
+        if not cleaned:
+            return
+        real_name = self.resolve_alias(cleaned)
+        order = self.state.setdefault("speech_order", [])
+        # Keep last 10 entries
+        order.append(real_name)
+        if len(order) > 10:
+            order.pop(0)
+
+    def get_recent_speakers_text(self):
+        """Get a hint about who spoke recently - useful for alternating pattern."""
+        order = self.state.get("speech_order", [])
+        if not order:
+            return ""
+        unique = []
+        for s in order:
+            if s not in unique:
+                unique.append(s)
+            if len(unique) >= 3:
+                break
+        last = order[-1] if order else ""
+        if last:
+            text = f"  [Last speaker: {last}]"
+            if len(unique) >= 2:
+                text += f"\n  [Exchange: {unique[0]} ↔ {unique[1]}]"
+            # Check if the last 4 show clear alternation
+            if len(order) >= 4:
+                recent = order[-4:]
+                if recent[0] != recent[1] and recent[2] != recent[3] and recent[0] == recent[2] and recent[1] == recent[3]:
+                    text += "\n  [Alternating pattern confirmed]"
+            return text
+        return ""
 
     def save(self, round_num=0):
         if round_num > 0 and os.path.exists(STATE_PATH):
@@ -462,19 +659,32 @@ class CharacterState:
 class ShortMemAgent:
     def __init__(self, max_rounds=20):
         self.max_rounds = max_rounds
-        self.history = []  # [(line_num, dialogue_text, speaker, reason)]
+        self.history = []  # [(line_num, dialogue_text, speaker, reason, narrative_before)]
 
-    def update(self, line_num, dialogue_text, speaker, reason=""):
-        self.history.append((line_num, dialogue_text, speaker, reason))
+    def update(self, line_num, dialogue_text, speaker, reason="", narrative_before=""):
+        self.history.append((line_num, dialogue_text, speaker, reason, narrative_before))
         if len(self.history) > self.max_rounds:
             self.history.pop(0)
+
+    def detect_rapid_exchange(self, min_length=3):
+        """Detect if last N entries alternate between two speakers."""
+        if len(self.history) < min_length:
+            return False
+        recent = [entry[2] for entry in self.history[-min_length:]]
+        unique = list(dict.fromkeys(recent))
+        if len(unique) != 2:
+            return False
+        for i in range(1, len(recent)):
+            if recent[i] == recent[i-1]:
+                return False
+        return True
 
     def _get_exchange_rhythm(self):
         """Detect rapid 2-person exchange pattern and return a hint."""
         if len(self.history) < 4:
             return None
         recent = self.history[-8:]  # last 8 rounds max
-        speakers = [sp for _, _, sp, _ in recent]
+        speakers = [sp for _, _, sp, _, _ in recent]
 
         # Get the last two distinct speakers (in order of first appearance)
         seen = []
@@ -513,17 +723,21 @@ class ShortMemAgent:
     def get_summary(self):
         if not self.history:
             return "(No prior annotations)"
-        lines = ["[Recent Dialogue History - Original Text]"]
-        for line_num, dlg, speaker, reason in self.history:
-            line = f"  #{line_num} [L{line_num}] 「{dlg}」 -> {speaker}"
-            if reason:
-                line += f"\n      reason: {reason[:120]}"
+        lines = ["[Recent Dialogues]"]
+        for line_num, dlg, speaker, reason, narr in self.history:
+            narr_note = f" [before: {narr[:60]}]" if narr else ""
+            line = f"  L{line_num}「{dlg[:50]}」-> {speaker}{narr_note}"
             lines.append(line)
         # Add exchange rhythm hint
         rhythm = self._get_exchange_rhythm()
         if rhythm:
             lines.append("")
             lines.append(rhythm)
+        # Add rapid exchange warning
+        if self.detect_rapid_exchange(4):
+            lines.append("")
+            lines.append("RAPID EXCHANGE: Last 4 dialogues alternate between two speakers.")
+            lines.append("RULE: Narrative attribution (#1) before alternation (#3). Read 3-5 lines before target.")
         return "\n".join(lines)
 
 
@@ -594,7 +808,7 @@ class LabelerAgent:
 
     def label(self, line_num, dialogue, short_mem_text, fact_summary,
                char_state_text, navigation_text, scene_summary, round_log, quiet=False,
-               override_force_tool=True):
+               override_force_tool=True, recent_speakers_hint=""):
         """
         Label one dialogue's speaker. Returns (speaker, summary, reason, pec, ec).
         """
@@ -602,106 +816,124 @@ class LabelerAgent:
         system_prompt = """You are a dialogue speaker annotation assistant. Your ONLY task is to identify who speaks a given line of dialogue in a Chinese novel.
 
 ========================================
-YOUR TOOL - Your ONLY source for novel text
+TOOL - Your ONLY source for novel text
 ========================================
 
 Tool: read_novel_lines(start, count)
 - Reads 'count' lines from novel.txt starting at line 'start' (1-based)
-- Returns: each line as "line_number: content"
+- Returns each line as: "line_number: content"
 - You can call this multiple times, in any order, for any range
+**You do NOT have the novel text. You MUST use read_novel_lines to read it.**
 
-**You do NOT have the novel text. You MUST use read_novel_lines to read it. There is no other way.**
+========================================
+EVIDENCE HIERARCHY (Priority)
+========================================
+
+1. [HIGHEST] Speech verbs naming the speaker in the IMMEDIATE context
+   Lines like: "XX说", "XX喊道", "XX开口", "XX回答", "XX问", "XX叹息", "XX回答"
+   If you find one within 5 lines of the dialogue → USE IT. You are done.
+
+2. [HIGH] Narrative-position evidence
+   The paragraph/sentence structure around the dialogue. E.g.:
+   - "XX做了某事，然后说：" → XX is the speaker
+   - "XX说道：" → XX is the speaker
+   - "XX回答那人说：" → XX is the speaker
+   The line IMMEDIATELY before a 「dialogue」 is the most important.
+
+3. [MEDIUM] Alternating dialogue pattern
+   When two characters trade short lines in quick succession.
+   BUT: only trust the pattern when there is NO narrative paragraph between lines.
+   A narrative paragraph between two lines BREAKS the alternating pattern.
+
+4. [LOW] Character availability / scene presence
+   Just because a character was mentioned or recently active does NOT mean they are speaking.
+
+========================================
+CRITICAL RULES - Do NOT Violate
+========================================
+
+RULE A: Speech verbs over everything
+- If you find "说/喊道/问/开口/回答/继续说/低语" naming a character within 5 lines, THAT is the speaker
+- Ignore any narrative that describes appearance/thoughts/actions of a different character
+- Narrative describing how someone looks/feels does NOT prove they are speaking
+
+RULE B: Read locally FIRST
+- Start reading from 5-10 lines BEFORE the dialogue line
+- The evidence you need is almost always within 5 lines
+- Only expand search range if you find NO speech verb in the immediate context
+- Do NOT search 40+ lines away unless local search found nothing
+
+RULE C: Distinguish "speaker" from "mentioned person"
+- "被XX的人物" = mentioned, not speaking
+- "XX的人物" = describes someone, not speaking
+- A line like "XX看着YY" describes the observer (XX), not the speaker
+- Look for the pattern: [Narrative about character A + speech verb]「dialogue」→ A is speaker
+
+RULE D: Speaker names - use what the text actually uses
+- Has a specific name → use that name
+- Has a role/group identity but no name → use the role: 村民, 骑士, 商人, 众人
+- Group/collective speech → use the group name, NOT "非人物发声"
+- Temporary descriptor (女孩, 少年, 老汉, 大汉, etc.) → only use if no real name is found after forward search
+- Do NOT make up a name or use the wrong role
+
+RULE E: Non-person speech - ONLY for these cases
+- Ambient sounds, object sounds, sound effects → "非人物发声"
+- If the text explicitly says a character made the sound, credit the character
+- Collective shouting/group speech is NOT "非人物发声"
+
+RULE F: Alternating dialogue - specific rules
+- Two characters exchanging short lines (<20 chars each) → fast exchange likely
+- If there is NO narrative between two adjacent dialogues, the speaker likely alternates
+- But: if a narrative paragraph appears between two dialogues → the pattern RESETS
+- One character CAN speak multiple consecutive lines (not always alternating)
+- RULE: If immediate narrative contains a speech verb → that overrides ALL alternating patterns
+- RULE: If there is no speech verb AND no narrative between → use alternating + who-last-spoke
 
 ========================================
 WORKFLOW
 ========================================
 
-[Phase 1 - Initial Read]
-1. You receive: target dialogue line number + text, plus auxiliary info
-2. FIRST: call read_novel_lines for the target area. Recommended: target line +/- 40 lines
-3. Read carefully. Look for:
-   - Narrative BEFORE the dialogue: "XX说", "XX喊道", "XX开口", "XX回答"
-   - Narrative AFTER the dialogue: "刚才是XX说的", "XX说完"
-   - Dialogue tone/voice matching a known character
+1. CALL read_novel_lines for lines around the target (±15 lines)
+   Read lines 10-15 BEFORE the dialogue first. Look for speech verbs naming the speaker.
 
-[Phase 2 - Deep Search (if needed)]
-4. If Phase 1 is not enough:
-   a. Expand range (+/- 60-80 lines) for more context
-   b. If a character appears for the first time, search BACK for their introduction
-      - Real names appear near: "我叫XX", "咱是XX", "名字是XX", "吾乃XX"
-      - Before a real name is revealed, use whatever the text uses
-   c. If scene changed, the speaking group may have changed too
-   d. **CRITICAL - Unnamed descriptor**: If you see a temporary descriptor like "女孩"/"少年"/"老人"/"大汉"
-      that describes ONE specific person, you MUST search FORWARD 150-300 lines for a real name reveal.
-      Look for self-introduction patterns. If found, USE THE REAL NAME.
-      If not found after 300 lines, use the descriptor.
-   e. **Token budget**: If cumulative tool call tokens exceed ~15K, STOP searching and output best guess.
+2. If you find a speech verb within 5 lines → CONFIRM and output answer immediately
+   Do NOT search further. You have your answer.
 
-[Phase 3 - Output]
-5. When you are done searching, output the final answer in the format below.
+3. If no speech verb found → expand search range (±30 lines)
+   Check for:
+   a. Who spoke last (from auxiliary info and text)
+   b. Is there an alternating pattern?
+   c. Did the scene change?
+
+4. If using a temporary descriptor (女孩, 少年, etc.) → search forward 100-200 lines for a name reveal
+   Look for: "我叫XX", "咱的名字是XX", "名字是XX", "吾乃XX"
+   If found → use the revealed name. If not found after 200 lines → use the descriptor.
+
+5. Output with <answer>, <reason>, <summary>. Optionally add <discovery> if you find new character info.
 
 ========================================
-ANNOTATION RULES（标注规则 - 关键）
+OUTPUT FORMAT
 ========================================
 
-【规则1：说话人名称——用原文实际使用的称呼】
-- 有具体姓名 → 用具体姓名
-- 无姓名但有身份/群体 → 用身份称呼：村民、骑士、商人、众人、未知
-- 群体呼喊、集体对话 → 用群体称呼，不要标"非人物发声"
-- 临时描述词（女孩、少年等）→ 必须前向搜索真名（见Phase 2d）
-- 群体称呼（村民、骑士、众人）→ 直接使用，无需搜索
+<answer>speaker_name</answer>
+- One single speaker name, or "非人物发声"
+- Do NOT use "|" to separate multiple names
+- If unsure, use a descriptive label (what the novel calls them). This triggers an automated search.
 
-【规则2：叙事标记优先于推理】
-- "XX说""XX喊道"等叙事句中的称呼是权威证据，直接使用
-- 对话交替规律只是辅助线索，不能替代叙事标记
-- 同一角色可以连续说多句，不要强行假设交替
+<reason>your reasoning</reason>
+- In English or Chinese (both OK)
+- Cite specific line numbers as evidence
+- State which speech verb or evidence you found
+- If auxiliary info contradicts the novel text, explain why
 
-【规则3：非人物发声——仅用于以下情况】
-- 环境声、物体声、音效 → "非人物发声"
-- 如果文本明确说明某个角色发出了声音（喊叫、叹息、嚎叫），标注该角色
-- 群体呼喊不是"非人物发声"
+<summary>brief summary</summary>
+- Format: speaker_name | what they said/did
+- Keep concise for memory
 
-【规则4：新角色/角色不在状态表】
-- 区分"谁在说话"和"在说谁"——被提到的角色名未必是说话人
-- 如果角色不在状态表中，如实使用原文中的称呼
-
-【规则5：快速对话交换——防止角色混淆】
-- 当两个角色快速交换短对话（每句<15字）时：
-  a. 先查看原文中是否有"XX说"等叙事标记
-  b. 如果没有叙事标记，用最近标注记录追踪轮换顺序
-  c. **特别注意**：快速交换中同一角色不太可能连续说多句
-  d. 如果最近几轮中两个角色各说了几句，按此交替规律推理
-  e. 叙事标记始终覆盖交替规律
-
-========================================
-OUTPUT FORMAT（严格 - 4个标签都必须有）
-========================================
-
-<answer>speaker name</answer>
-- 单个角色名，或"非人物发声"
-- 不要用"|"分隔多个名字
-
-<reason>your reasoning in Chinese</reason>
-- 引用具体的行号作为证据
-- 说明使用了哪些叙事标记或上下文线索
-
-<summary>一句话摘要</summary>
-- 格式：说话人 | 做了什么/说了什么
-- 保持简洁，用于短期记忆
-
-<state_update>
-UPDATE character: speaker.last_seen_line = {line_num}
-(add only if new discovery:)
-(UPDATE alias: alias_name -> real_name  -- only if text explicitly reveals identity)
-(NEW character: character_name  -- only if CharacterState doesn't have this character)
-</state_update>
-
-RULES for state_update:
-- Character names ONLY - no descriptions, no annotations
-- CORRECT: NEW character: 骑士
-- FORBIDDEN: NEW character: some_name -- according to L123
-- FORBIDDEN: NEW character: 骑士 (a new character)
-- If you append any description after the name, the entry will be rejected"""
+<discovery>(Optional) Identity evidence discovered</discovery>
+- Only include if you found new evidence about a character's identity
+- Example: "角色在L42自我介绍为XX"
+- This will be processed by a separate search agent"""
 
         user_content = f"""Annotate the speaker of this dialogue:
 
@@ -721,14 +953,19 @@ Short-term memory labels and character state are reference only.
 
 {fact_summary}
 
+{recent_speakers_hint}
+
 [Character State]
 {char_state_text}
 
 ========================================
-You do NOT have the novel text. You MUST call read_novel_lines to read it.
-Start with target line +/- 40 lines, then search deeper as needed.
+You can use TWO tools:
+1. read_novel_lines(start, count) — read specific lines
+2. search_novel(keyword, context_lines=2) — search by keyword/name
+Start reading 5-10 lines BEFORE the target line. Look for speech verbs naming the speaker.
+If found, you are done. If not, expand gradually or use search_novel.
 If you think an auxiliary label is wrong, say so in <reason>.
-========================================"""
+========================================="""
 
         messages = [
             {"role": "system", "content": system_prompt},
@@ -741,7 +978,7 @@ If you think an auxiliary label is wrong, say so in <reason>.
         cumulative_tokens = 0
 
         for round_i in range(MAX_TOOL_ROUNDS):
-            text, pec, ec, tool_calls = call_ollama(messages, tools=[TOOL_READ_NOVEL], label=f"Labeler-R{round_i+1}")
+            text, pec, ec, tool_calls = call_ollama(messages, tools=LABELER_TOOLS, label=f"Labeler-R{round_i+1}")
             total_pec += pec
             total_ec += ec
             cumulative_tokens += pec + ec
@@ -789,7 +1026,8 @@ If you think an auxiliary label is wrong, say so in <reason>.
                 func = tc.get("function", {})
                 raw_args = func.get("arguments", "{}")
                 func_args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
-                if func.get("name") == "read_novel_lines":
+                name = func.get("name", "")
+                if name == "read_novel_lines":
                     s = func_args.get("start", 1)
                     c = func_args.get("count", 10)
                     result = read_novel_lines(s, c)
@@ -797,13 +1035,21 @@ If you think an auxiliary label is wrong, say so in <reason>.
                     if not quiet:
                         print(f"    Tool call #{self.tool_call_count}: read_novel_lines({s}-{s+c-1}) -> {len(result)} chars, pec={pec}, ec={ec}")
                     messages.append({"role": "tool", "content": result})
+                elif name == "search_novel":
+                    keyword = func_args.get("keyword", "")
+                    ctx = func_args.get("context_lines", 2)
+                    result = search_novel(keyword, ctx)
+                    self.tool_call_count += 1
+                    if not quiet:
+                        print(f"    Tool call #{self.tool_call_count}: search_novel('{keyword}') -> {len(result)} chars, pec={pec}, ec={ec}")
+                    messages.append({"role": "tool", "content": result})
 
             # Token budget check
             if cumulative_tokens >= TOKEN_BUDGET:
                 if not quiet:
                     print(f"    Token budget reached ({cumulative_tokens} >= {TOKEN_BUDGET}), stopping search")
                 # Force final answer on next call
-                messages.append({"role": "user", "content": "You have enough information. Now output your final answer with <answer>, <reason>, <summary>, and <state_update> tags."})
+                messages.append({"role": "user", "content": "Token budget reached. Output your best answer with <answer>, <reason>, and <summary> tags."})
                 continue
 
         else:
@@ -812,11 +1058,14 @@ If you think an auxiliary label is wrong, say so in <reason>.
 
         round_log["tool_calls"] = tool_call_log
 
+        # Track how many tool rounds the Labeler used (for Verifier decision)
+        tool_rounds_used = len(tool_call_log)
+
         speaker = self._parse_answer(text)
         summary = self._parse_summary(text)
         reason = self._parse_reason(text)
 
-        return speaker, summary, reason, total_pec, total_ec
+        return speaker, summary, reason, total_pec, total_ec, tool_rounds_used
 
     def _is_garbage_speaker(self, speaker):
         """Check if a speaker name is clearly garbage (not a valid character name)."""
@@ -933,8 +1182,8 @@ Call read_novel_lines to verify. Form your own conclusion first, then compare.
             {"role": "user", "content": user_content}
         ]
 
-        # Allow up to 3 tool rounds for the verifier
-        for round_i in range(3):
+        # Allow up to 1 tool round for quick verification
+        for round_i in range(1):
             text, pec, ec, tool_calls = call_ollama(messages, tools=[TOOL_READ_NOVEL], label=f"Verifier-R{round_i+1}")
             if not tool_calls:
                 break
@@ -980,18 +1229,26 @@ Call read_novel_lines to verify. Form your own conclusion first, then compare.
 # ============================================================
 
 class Boss:
-    def __init__(self, short_mem_rounds=20, fact_curator_every=10):
+    def __init__(self, short_mem_rounds=20):
         self.labeler = LabelerAgent()
-        self.verifier = VerifierAgent()
         self.short_mem = ShortMemAgent(max_rounds=short_mem_rounds)
-        self.fact_curator = FactCurator(curator_every=fact_curator_every)
-        self.char_state = CharacterState()
         self.dialogue_list = get_dialogue_list()
         self.total_tokens = 0
-        self.verifier_disagreements = 0
         self.round_count = 0
+        self.search_agent_triggers = 0
+        self.corrections = 0
+        # Import EvidenceVault and SearchAgent
+        from evidence_vault import EvidenceVault
+        from search_agent import SearchAgent
+        self.vault = EvidenceVault(VAULT_PATH)
+        self.search_agent = SearchAgent(
+            call_ollama_fn=call_ollama,
+            read_novel_fn=read_novel_lines,
+            deep_search_fn=deep_search_identity,
+            find_refs_fn=find_all_references
+        )
 
-    def _build_navigation(self, line_num, nav_range=20):
+    def _build_navigation(self, line_num, nav_range=25):
         """Build original text navigation around target line - NO speaker labels."""
         lines = []
         start = max(1, line_num - nav_range)
@@ -1012,21 +1269,16 @@ class Boss:
 
             marker = " "
             if ln == line_num:
-                marker = "->"
+                marker = ">>"
 
-            if "「" in content:
-                lines.append(f"  {marker}L{ln}: 「{content[:60]}」")
+            if "\u300c" in content:
+                display = content[:120]
+                lines.append(f"  {marker}L{ln}: \u300c{display}\u300d")
             else:
-                lines.append(f"  {marker}L{ln}: [narrative] {content[:70]}")
+                display = content[:120]
+                lines.append(f"  {marker}L{ln}: [narr] {display}")
 
         return "\n".join(lines)
-
-    def _is_swap_error(self, labeler_speaker, verifier_speaker, short_mem_text):
-        """Heuristic: if two characters have been alternating and Verifier suggests the opposite, trust Verifier."""
-        # Simple check: if short_mem shows alternation pattern and Verifier suggests the opposite speaker
-        if "Exchange rhythm" in short_mem_text and "Alternating" in short_mem_text:
-            return True
-        return False
 
     def process_one(self, line_num, dialogue, round_log, quiet=False):
         self.round_count += 1
@@ -1034,104 +1286,102 @@ class Boss:
         if not quiet:
             print(f"\n{'='*60}")
             print(f"  Round {self.round_count}")
-            print(f"  Dialogue: L{line_num}「{dialogue}」")
+            print(f"  Dialogue: L{line_num}\u300c{dialogue}\u300d")
             print(f"{'='*60}")
 
-        # 1. Get memory and state
+        # 1. Build context: Novel Map (structure overview) + navigation (full text)
+        context_text = build_context_index(line_num, 40)
+        navigation_text = self._build_navigation(line_num, nav_range=25)
+
+        # 2. Get evidence and memory
+        evidence_text = self.vault.get_state_text(current_line=line_num)
         short_mem_text = self.short_mem.get_summary()
-        fact_summary = self.fact_curator.get_summary()
-        char_state_text = self.char_state.get_state_text(current_line=line_num)
-        scene_summary = self.char_state.get_scene_summary(current_line=line_num)
 
-        # 2. Build navigation
-        navigation_text = self._build_navigation(line_num, nav_range=20)
+        # 3. Detect rapid exchange for extra warning
+        if self.short_mem.detect_rapid_exchange(4):
+            short_mem_text += ("\n\nRAPID EXCHANGE: Last 4+ dialogues alternate between two speakers.\n"
+                               "RULE: Narrative attribution (#1) takes priority over alternation (#3).\n"
+                               "Read 3-5 lines BEFORE the target to check for speech verbs.")
 
-        # 3. Log boss task
+        # 4. Log boss task
         round_log["boss_task"] = {
             "dialogue_line": line_num,
             "dialogue_text": dialogue,
             "short_mem": short_mem_text,
-            "fact_summary": fact_summary,
-            "char_state": char_state_text,
+            "evidence": evidence_text,
             "navigation": navigation_text,
         }
 
-        # 4. Call Labeler
-        speaker, summary, reason_text, pec, ec = self.labeler.label(
-            line_num, dialogue, short_mem_text, fact_summary,
-            char_state_text, navigation_text, scene_summary,
-            round_log, quiet=quiet, override_force_tool=True
+        # 5. Call Labeler (READ-ONLY, no state writing)
+        speaker, summary, reason_text, pec, ec, tool_rounds_used = self.labeler.label(
+            line_num, dialogue, short_mem_text, "",
+            evidence_text, navigation_text, "",
+            round_log, quiet=quiet, override_force_tool=True,
+            recent_speakers_hint=""
         )
         self.total_tokens += pec + ec
 
         if not quiet:
-            print(f"  Labeler: {speaker}")
+            print(f"  Labeler: {speaker} (tools={tool_rounds_used})")
 
-        # 5. Verifier Agent: independent cross-check
-        verdict, verifier_speaker, verifier_reason = self.verifier.verify(
-            line_num, dialogue, navigation_text, short_mem_text,
-            scene_summary, char_state_text, speaker, round_log, quiet=quiet
-        )
-
-        if verdict == "disagree" and verifier_speaker != speaker:
-            self.verifier_disagreements += 1
-            if not quiet:
-                print(f"  🔄 Labeler re-annotating based on Verifier feedback...")
-            # Ask Labeler to re-annotate with Verifier's concern
-            recheck_prompt = f"The Verifier suggests '{verifier_speaker}' instead of '{speaker}'. Read the novel text carefully and reconsider. Evidence: {verifier_reason}"
-            speaker, summary, reason_text, pec2, ec2 = self.labeler.label(
-                line_num, dialogue, short_mem_text, fact_summary,
-                char_state_text, navigation_text, scene_summary,
-                round_log, quiet=True, override_force_tool=False
-            )
-            self.total_tokens += pec2 + ec2
-            if not quiet:
-                print(f"  Labeler after re-check: {speaker}")
-            # Use Verifier's answer if Labeler still disagrees
-            if speaker == verifier_speaker or self._is_swap_error(speaker, verifier_speaker, short_mem_text):
-                speaker = verifier_speaker
-
-        # 6. Python-side forward search for temporary descriptors
+        # 6. SearchAgent: conditional trigger for temporary descriptors
+        corrected = False
         if speaker in TEMP_DESCRIPTORS:
-            resolved = self.char_state.resolve_alias(speaker)
-            if resolved == speaker:  # No alias yet
-                real_name, reveal_line = search_forward_for_name(line_num, speaker)
-                if real_name:
+            self.search_agent_triggers += 1
+            if not quiet:
+                print(f"  Temporary name: '{speaker}' -> triggering SearchAgent...")
+
+            search_result, s_pec, s_ec, s_tool_log = self.search_agent.investigate(
+                speaker, line_num, max_tool_rounds=4, quiet=quiet
+            )
+            self.total_tokens += s_pec + s_ec
+
+            if search_result["found"] and search_result["character"]:
+                character = search_result["character"]
+                aliases = search_result.get("aliases", [])
+                evidence_list = search_result.get("evidence", [])
+                status = search_result.get("status", "candidate")
+                intro_line = search_result.get("introduction_line")
+
+                self.vault.add_evidence(character, aliases, evidence_list, status, intro_line)
+                if not quiet:
+                    print(f"  SearchAgent found: '{character}' ({status})")
+
+                if status == "verified":
+                    old_speaker = speaker
+                    speaker = character
+                    corrected = True
+                    self.corrections += 1
                     if not quiet:
-                        print(f"  🔍 Forward search: '{speaker}' -> '{real_name}' at L{reveal_line}")
-                    self.char_state.add_alias(real_name, speaker, is_identity_reveal=True)
-                    # Update fact_summary with this discovery
-                    speaker = real_name  # Override with real name!
+                        print(f"  Corrected: '{old_speaker}' -> '{character}'")
+            else:
+                if not quiet:
+                    print(f"  SearchAgent: no identity found for '{speaker}'")
 
-        # 6. Update memory
-        self.short_mem.update(line_num, dialogue, speaker, reason_text)
+        # 7. Update EvidenceVault last_seen
+        if speaker and speaker != "非人物发声" and speaker != "non-human":
+            self.vault.update_last_seen(speaker, line_num)
 
-        # 6. Update character state
-        if speaker != "non-human" and speaker != "非人物发声":
-            clean_speaker = validate_char_name(speaker)
-            if clean_speaker:
-                self.char_state.update_character(clean_speaker, line_num, dialogue_text=dialogue)
+        # 8. Fallback
+        if not speaker:
+            speaker = "?"
 
-        labeler_response = round_log["agents"].get("Labeler", {}).get("response", "")
-        self.char_state.parse_state_update(labeler_response, line_num, dialogue=dialogue)
-        self.char_state.save(round_num=self.round_count)
+        # 9. Write to labeled.txt
+        write_label(speaker)
 
-        # 7. FactCurator: every N rounds
-        self.fact_curator.add_round(line_num, speaker, summary)
-        if self.fact_curator.should_curate():
-            if not quiet:
-                print(f"  FactCurator: maintaining character facts...")
-            fc_mem = self.short_mem.get_summary()
-            char_state_json = self.char_state.state
-            self.fact_curator.curate(fc_mem, char_state_json, round_log)
-            self.char_state.save(round_num=self.round_count)
-            if not quiet:
-                print(f"  Character facts updated.")
+        # 10. Update ShortMem with narrative context
+        narr_before = get_narrative_before(line_num)
+        self.short_mem.update(line_num, dialogue, speaker, reason_text, narrative_before=narr_before)
+
+        # 11. Save vault periodically
+        if self.round_count % 50 == 0:
+            self.vault.save()
 
         round_log["result"] = {
             "speaker": speaker,
             "summary": summary,
             "reason": reason_text,
+            "corrected": corrected,
         }
 
         return speaker
@@ -1240,13 +1490,10 @@ def main():
 
     # Reset state if requested
     if args.reset_state:
-        print("  Resetting character state...")
-        if os.path.exists(STATE_PATH):
-            os.remove(STATE_PATH)
-        if os.path.exists(LOG_PATH):
-            os.remove(LOG_PATH)
-        if os.path.exists(LABELED_PATH):
-            os.remove(LABELED_PATH)
+        print("  Resetting all state...")
+        for p in [STATE_PATH, LOG_PATH, LABELED_PATH, VAULT_PATH]:
+            if os.path.exists(p):
+                os.remove(p)
         print("  State cleared. Starting fresh.")
 
     # Get dialogues
@@ -1287,7 +1534,6 @@ def main():
         line_num, dialogue = dialogues[idx]
         round_log = new_round(idx - start_idx + 1, line_num, dialogue)
         speaker = boss.process_one(line_num, dialogue, round_log, quiet=quiet_mode)
-        write_label(speaker)
         log_entry(round_log)
 
         batch_tool_calls += len(round_log.get("tool_calls", []))
@@ -1322,6 +1568,9 @@ def main():
     print(f"  Annotation complete")
     print(f"  Dialogues annotated: {end_idx - start_idx}")
     print(f"  Tool calls: {boss.labeler.tool_call_count}")
+    print(f"  SearchAgent triggers: {boss.search_agent_triggers}")
+    print(f"  Corrections: {boss.corrections}")
+    print(f"  Evidence vault: {VAULT_PATH}")
     print(f"  Log: {LOG_PATH}")
     print(f"{'='*60}")
 
