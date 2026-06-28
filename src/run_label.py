@@ -694,7 +694,7 @@ class ShortMemAgent:
             if len(seen) == 2:
                 break
         if len(seen) != 2:
-            return None  # Not a 2-person exchange
+            return None, None  # Not a 2-person exchange
 
         a, b = seen[0], seen[1]
 
