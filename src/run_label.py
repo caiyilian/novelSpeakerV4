@@ -16,7 +16,6 @@ Key design principles:
   6. Active backward search for unnamed characters (girl -> real name)
 """
 import sys, io
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
 import sys
 import os
@@ -660,6 +659,7 @@ class ShortMemAgent:
     def __init__(self, max_rounds=20):
         self.max_rounds = max_rounds
         self.history = []  # [(line_num, dialogue_text, speaker, reason, narrative_before)]
+        self.phase_violation = False  # set by Boss when model contradicts alternating pattern
 
     def update(self, line_num, dialogue_text, speaker, reason="", narrative_before=""):
         self.history.append((line_num, dialogue_text, speaker, reason, narrative_before))
@@ -680,9 +680,9 @@ class ShortMemAgent:
         return True
 
     def _get_exchange_rhythm(self):
-        """Detect rapid 2-person exchange pattern and return a hint."""
+        """Detect rapid 2-person exchange pattern and return (text, next_expected)."""
         if len(self.history) < 4:
-            return None
+            return None, None
         recent = self.history[-8:]  # last 8 rounds max
         speakers = [sp for _, _, sp, _, _ in recent]
 
@@ -703,7 +703,7 @@ class ShortMemAgent:
         count_a = speakers.count(a)
         count_b = speakers.count(b)
         if count_a < 2 or count_b < 2:
-            return None
+            return None, None
 
         # Check how well they alternate (allow one deviation)
         expected = a
@@ -715,9 +715,25 @@ class ShortMemAgent:
         # If more than half the positions match an alternating pattern, it's likely a dialogue
         if switches >= len(speakers) * 0.6:
             next_expected = b if speakers[-1] == a else a
-            return (f"[Exchange rhythm - last {len(speakers)} rounds]\n"
-                    f"  Alternating: {a} ↔ {b}\n"
-                    f"  Current expects: {next_expected} (opposite of previous speaker)")
+            text = (f"[Exchange rhythm - last {len(speakers)} rounds]\n"
+                    f"  Alternating: {a} \u2194 {b}\n"
+                    f"  Current expects: {next_expected} (opposite of previous speaker)\n"
+                    f"  NEXT EXPECTED: {next_expected}")
+            return text, next_expected
+        return None, None
+
+    def get_next_expected(self):
+        """Get the expected next speaker based on alternating pattern, or None."""
+        _, next_exp = self._get_exchange_rhythm()
+        if next_exp:
+            return next_exp
+        # Short-window fallback: just look at last 2
+        if len(self.history) >= 2:
+            last_two = set(entry[2] for entry in self.history[-2:])
+            if len(last_two) == 2:
+                speakers = list(last_two)
+                last = self.history[-1][2]
+                return speakers[1] if speakers[0] == last else speakers[0]
         return None
 
     def get_summary(self):
@@ -729,16 +745,42 @@ class ShortMemAgent:
             line = f"  L{line_num}「{dlg[:50]}」-> {speaker}{narr_note}"
             lines.append(line)
         # Add exchange rhythm hint
-        rhythm = self._get_exchange_rhythm()
+        rhythm, _ = self._get_exchange_rhythm()
         if rhythm:
             lines.append("")
             lines.append(rhythm)
+
+        # Add phase violation constraint for the next round
+        if self.phase_violation:
+            next_exp = self.get_next_expected()
+            if next_exp:
+                lines.append("")
+                lines.append(f"[ANCHOR CONSTRAINT] Last round violated the alternating pattern!")
+                lines.append(f"The last {min(len(self.history), 8)} rounds form {self._alternating_pair_name()}.")
+                lines.append(f"NEXT SPEAKER MUST BE: {next_exp} (strict alternation - do NOT repeat the previous speaker)")
+                lines.append("RULE: Only override this if the narrative clearly assigns speech to a different character.")
+
         # Add rapid exchange warning
         if self.detect_rapid_exchange(4):
             lines.append("")
             lines.append("RAPID EXCHANGE: Last 4 dialogues alternate between two speakers.")
             lines.append("RULE: Narrative attribution (#1) before alternation (#3). Read 3-5 lines before target.")
         return "\n".join(lines)
+
+    def _alternating_pair_name(self):
+        """Get the two alternating speaker names as a readable string."""
+        if len(self.history) < 4:
+            return "?"
+        speakers = [entry[2] for entry in self.history[-min(len(self.history), 8):]]
+        seen = []
+        for s in speakers:
+            if s not in seen:
+                seen.append(s)
+            if len(seen) == 2:
+                break
+        if len(seen) == 2:
+            return f"{seen[0]} ↔ {seen[1]} alternation"
+        return "alternation"
 
 
 # ============================================================
@@ -1217,9 +1259,9 @@ Call read_novel_lines to verify. Form your own conclusion first, then compare.
 
         if not quiet:
             if verdict == "disagree":
-                print(f"  ⚠️ Verifier disagrees: Labeler={labeler_speaker} -> Verifier={suggested}")
+                self._safe_print(f"  Verifier disagrees: Labeler={labeler_speaker} -> Verifier={suggested}")
             else:
-                print(f"  ✓ Verifier confirms: {labeler_speaker}")
+                self._safe_print(f"  Verifier confirms: {labeler_speaker}")
 
         return verdict, suggested, reason
 
@@ -1280,14 +1322,22 @@ class Boss:
 
         return "\n".join(lines)
 
+    def _safe_print(self, msg):
+        """Print to stderr, resilient on Windows even after Ollama API calls that may corrupt stdout."""
+        try:
+            sys.stderr.write(msg + "\n")
+            sys.stderr.flush()
+        except (ValueError, OSError):
+            pass
+
     def process_one(self, line_num, dialogue, round_log, quiet=False):
         self.round_count += 1
 
         if not quiet:
-            print(f"\n{'='*60}")
-            print(f"  Round {self.round_count}")
-            print(f"  Dialogue: L{line_num}\u300c{dialogue}\u300d")
-            print(f"{'='*60}")
+            self._safe_print(f"\n{'='*60}")
+            self._safe_print(f"  Round {self.round_count}")
+            self._safe_print(f"  Dialogue: L{line_num}\u300c{dialogue}\u300d")
+            self._safe_print(f"{'='*60}")
 
         # 1. Build context: Novel Map (structure overview) + navigation (full text)
         context_text = build_context_index(line_num, 40)
@@ -1322,14 +1372,27 @@ class Boss:
         self.total_tokens += pec + ec
 
         if not quiet:
-            print(f"  Labeler: {speaker} (tools={tool_rounds_used})")
+            self._safe_print(f"  Labeler: {speaker} (tools={tool_rounds_used})")
+
+        # 5b. Phase anchor check: did Labeler violate the alternating pattern?
+        corrected = False
+        next_exp = self.short_mem.get_next_expected()
+        if next_exp and speaker != next_exp:
+            self.short_mem.phase_violation = True
+            if not quiet:
+                self._safe_print(f"  Phase violation: expected {next_exp}, got {speaker}")
+        else:
+            self.short_mem.phase_violation = False
 
         # 6. SearchAgent: conditional trigger for temporary descriptors
-        corrected = False
         if speaker in TEMP_DESCRIPTORS:
             self.search_agent_triggers += 1
             if not quiet:
-                print(f"  Temporary name: '{speaker}' -> triggering SearchAgent...")
+                try:
+                    sys.stderr.write(f"  Temporary name: '{speaker}' -> triggering SearchAgent...\n")
+                    sys.stderr.flush()
+                except (ValueError, OSError):
+                    pass
 
             search_result, s_pec, s_ec, s_tool_log = self.search_agent.investigate(
                 speaker, line_num, max_tool_rounds=4, quiet=quiet
@@ -1345,7 +1408,7 @@ class Boss:
 
                 self.vault.add_evidence(character, aliases, evidence_list, status, intro_line)
                 if not quiet:
-                    print(f"  SearchAgent found: '{character}' ({status})")
+                    self._safe_print(f"  SearchAgent found: '{character}' ({status})")
 
                 if status == "verified":
                     old_speaker = speaker
@@ -1353,10 +1416,10 @@ class Boss:
                     corrected = True
                     self.corrections += 1
                     if not quiet:
-                        print(f"  Corrected: '{old_speaker}' -> '{character}'")
+                        self._safe_print(f"  Corrected: '{old_speaker}' -> '{character}'")
             else:
                 if not quiet:
-                    print(f"  SearchAgent: no identity found for '{speaker}'")
+                    self._safe_print(f"  SearchAgent: no identity found for '{speaker}'")
 
         # 7. Update EvidenceVault last_seen
         if speaker and speaker != "非人物发声" and speaker != "non-human":
@@ -1450,6 +1513,11 @@ def validate():
 # ============================================================
 # Main
 # ============================================================
+
+def _writeline(msg):
+    """Write status line during annotation."""
+    print(msg)
+
 
 def main():
     parser = argparse.ArgumentParser(description="Multi-agent novel dialogue speaker annotation v4")
@@ -1546,33 +1614,29 @@ def main():
         remaining_sec = avg_sec * (total_rounds - done)
 
         if quiet_mode:
-            progress_bar = f"[{'#' * (done * 20 // total_rounds):20s}]"
-            line = (f"\r  {done:>4d}/{total_rounds:<4d} {progress_bar} "
-                    f"L{line_num:<5d} -> {speaker:<8s} "
-                    f"tools={batch_tool_calls:>3d} "
-                    f"tokens={batch_tokens:>8d} "
-                    f"avg={avg_sec:.0f}s/round "
-                    f"elapsed={fmt_duration(elapsed)} "
-                    f"remaining={fmt_duration(remaining_sec)}")
-            sys.stdout.write(line)
-            sys.stdout.flush()
+            elapsed = time.time() - start_time
+            avg_sec = elapsed / done
+            remaining_sec = avg_sec * (total_rounds - done)
+            _writeline(f"  [{done}/{total_rounds}] L{line_num} -> {speaker:<8s} | "
+                       f"tools={batch_tool_calls:>3d} avg={avg_sec:.0f}s "
+                       f"elapsed={fmt_duration(elapsed)} remaining={fmt_duration(remaining_sec)}")
         else:
-            print(f"  [{done}/{total_rounds}] L{line_num} -> {speaker:<8s} | "
-                  f"tools={batch_tool_calls:>3d} avg={avg_sec:.0f}s "
-                  f"elapsed={fmt_duration(elapsed)} remaining={fmt_duration(remaining_sec)}")
+            _writeline(f"  [{done}/{total_rounds}] L{line_num} -> {speaker:<8s} | "
+                       f"tools={batch_tool_calls:>3d} avg={avg_sec:.0f}s "
+                       f"elapsed={fmt_duration(elapsed)} remaining={fmt_duration(remaining_sec)}")
 
     if quiet_mode:
-        print()
+        _writeline("")
 
-    print(f"\n{'='*60}")
-    print(f"  Annotation complete")
-    print(f"  Dialogues annotated: {end_idx - start_idx}")
-    print(f"  Tool calls: {boss.labeler.tool_call_count}")
-    print(f"  SearchAgent triggers: {boss.search_agent_triggers}")
-    print(f"  Corrections: {boss.corrections}")
-    print(f"  Evidence vault: {VAULT_PATH}")
-    print(f"  Log: {LOG_PATH}")
-    print(f"{'='*60}")
+    _writeline(f"\n{'='*60}")
+    _writeline(f"  Annotation complete")
+    _writeline(f"  Dialogues annotated: {end_idx - start_idx}")
+    _writeline(f"  Tool calls: {boss.labeler.tool_call_count}")
+    _writeline(f"  SearchAgent triggers: {boss.search_agent_triggers}")
+    _writeline(f"  Corrections: {boss.corrections}")
+    _writeline(f"  Evidence vault: {VAULT_PATH}")
+    _writeline(f"  Log: {LOG_PATH}")
+    _writeline(f"{'='*60}")
 
     if args.validate:
         validate()
