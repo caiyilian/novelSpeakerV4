@@ -1,0 +1,226 @@
+{
+  "characters": {
+    "叶勒": {
+      "aliases": [],
+      "status": "candidate",
+      "evidence": [],
+      "introduction_line": null,
+      "last_seen_line": 2801
+    },
+    "众人": {
+      "aliases": [],
+      "status": "candidate",
+      "evidence": [],
+      "introduction_line": null,
+      "last_seen_line": 2793
+    },
+    "罗伦斯": {
+      "aliases": [
+        "Lorenz"
+      ],
+      "status": "candidate",
+      "evidence": [
+        {
+          "text": "罗伦斯擦去布满整个额头的汗水，笑着回答说：",
+          "line": 1993,
+          "type": "narrative_reference"
+        }
+      ],
+      "introduction_line": 1993,
+      "last_seen_line": 2990
+    },
+    "女孩": {
+      "aliases": [],
+      "status": "candidate",
+      "evidence": [],
+      "introduction_line": null,
+      "last_seen_line": 192
+    },
+    "赫萝": {
+      "aliases": [
+        "贤狼赫萝",
+        "赫萝（狼形态）"
+      ],
+      "status": "verified",
+      "evidence": [
+        {
+          "text": "「咱的名字是赫萝，好久没有以这种模样出现了。嗯，还不赖呢。」",
+          "line": 222,
+          "type": "self_intro"
+        },
+        {
+          "text": "「虽然咱长久以来被尊为神，且被束缚在这块土地上，但咱根本不是什么伟大的神。咱就是咱，咱是赫萝。」",
+          "line": 236,
+          "type": "self_intro"
+        },
+        {
+          "text": "「咱才不是神。汝看咱的脚这么大，应该也明白，咱不过是体型比较大，嗯……加上比身边同伴们还要聪明的狼罢了。咱是赫萝，贤狼赫萝。」",
+          "line": 381,
+          "type": "self_intro"
+        }
+      ],
+      "introduction_line": 222,
+      "last_seen_line": 2829
+    },
+    "男子": {
+      "aliases": [],
+      "status": "candidate",
+      "evidence": [],
+      "introduction_line": null,
+      "last_seen_line": 1980
+    },
+    "杰廉": {
+      "aliases": [],
+      "status": "verified",
+      "evidence": [
+        {
+          "text": "小的名叫杰廉，我想您应该看出来了，小的是刚入行的旅行商人，还请多多关照。",
+          "line": 634,
+          "type": "self_intro"
+        }
+      ],
+      "introduction_line": 634,
+      "last_seen_line": 1244
+    },
+    "佩连佐葡萄园领主": {
+      "aliases": [
+        "男子",
+        "领主"
+      ],
+      "status": "candidate",
+      "evidence": [
+        {
+          "text": "男子没有提及自己的姓名，这是贵族特有的习惯。他们以为即使自己没有道出姓名，对方也应该认识自己，所以他们认为由自己说出姓名的行为有失格调。",
+          "line": 619,
+          "type": "contextual_reference"
+        },
+        {
+          "text": "相信到了佩连佐，只要提到葡萄园的领主，就非这名男子莫属了吧。",
+          "line": 620,
+          "type": "narrative_declaration"
+        }
+      ],
+      "introduction_line": null,
+      "last_seen_line": 620
+    },
+    "米隆商行的店员": {
+      "aliases": [],
+      "status": "candidate",
+      "evidence": [],
+      "introduction_line": null,
+      "last_seen_line": 1007
+    },
+    "彪形大汉": {
+      "aliases": [],
+      "status": "candidate",
+      "evidence": [],
+      "introduction_line": null,
+      "last_seen_line": 1018
+    },
+    "米隆商行的采购人员": {
+      "aliases": [],
+      "status": "candidate",
+      "evidence": [],
+      "introduction_line": null,
+      "last_seen_line": 1045
+    },
+    "鉴定员": {
+      "aliases": [],
+      "status": "candidate",
+      "evidence": [],
+      "introduction_line": null,
+      "last_seen_line": 1106
+    },
+    "女店员": {
+      "aliases": [],
+      "status": "candidate",
+      "evidence": [],
+      "introduction_line": null,
+      "last_seen_line": 1180
+    },
+    "看似工匠的男子": {
+      "aliases": [],
+      "status": "candidate",
+      "evidence": [],
+      "introduction_line": null,
+      "last_seen_line": 1266
+    },
+    "怀兹": {
+      "aliases": [],
+      "status": "candidate",
+      "evidence": [],
+      "introduction_line": null,
+      "last_seen_line": 1431
+    },
+    "列支敦•马贺特": {
+      "aliases": [],
+      "status": "candidate",
+      "evidence": [],
+      "introduction_line": null,
+      "last_seen_line": 1631
+    },
+    "店老板": {
+      "aliases": [],
+      "status": "candidate",
+      "evidence": [],
+      "introduction_line": null,
+      "last_seen_line": 1678
+    },
+    "老卸货工": {
+      "aliases": [],
+      "status": "candidate",
+      "evidence": [],
+      "introduction_line": null,
+      "last_seen_line": 2013
+    },
+    "马贺特行长": {
+      "aliases": [],
+      "status": "candidate",
+      "evidence": [],
+      "introduction_line": null,
+      "last_seen_line": 2038
+    },
+    "马贺特": {
+      "aliases": [],
+      "status": "candidate",
+      "evidence": [],
+      "introduction_line": null,
+      "last_seen_line": 3004
+    },
+    "米隆商行的人": {
+      "aliases": [],
+      "status": "candidate",
+      "evidence": [],
+      "introduction_line": null,
+      "last_seen_line": 2575
+    },
+    "商行的人": {
+      "aliases": [],
+      "status": "candidate",
+      "evidence": [],
+      "introduction_line": null,
+      "last_seen_line": 2324
+    },
+    "马夫": {
+      "aliases": [],
+      "status": "candidate",
+      "evidence": [],
+      "introduction_line": null,
+      "last_seen_line": 2470
+    },
+    "梅迪欧商行的手下": {
+      "aliases": [],
+      "status": "candidate",
+      "evidence": [],
+      "introduction_line": null,
+      "last_seen_line": 2684
+    },
+    "银行职员": {
+      "aliases": [],
+      "status": "candidate",
+      "evidence": [],
+      "introduction_line": null,
+      "last_seen_line": 3000
+    }
+  }
+}
