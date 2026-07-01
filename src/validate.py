@@ -39,20 +39,31 @@ def main():
     parser.add_argument("--labeled", default=LABELED)
     parser.add_argument("--answers", default=ANSWERS)
     parser.add_argument("--detail", action="store_true")
+    parser.add_argument("--start", type=int, default=1, help="1-based dialogue index to start validation")
+    parser.add_argument("--count", type=int, default=0, help="number of dialogues to validate; 0 means through the end")
     args = parser.parse_args()
 
     labels = parse_labels(args.labeled)
     accept = parse_answers(args.answers)
-    N = min(len(labels), len(accept))
+    total = min(len(labels), len(accept))
+    start = max(1, args.start)
+    start_i = min(start - 1, total)
+    end_i = total if args.count <= 0 else min(start_i + args.count, total)
+    N = end_i - start_i
+    if N <= 0:
+        print("No dialogues in selected validation range.")
+        return 1
+
     correct = 0
     errors = []
-    for i in range(N):
+    for i in range(start_i, end_i):
         if labels[i] in accept[i]:
             correct += 1
         else:
             errors.append((i + 1, "|".join(sorted(accept[i])), labels[i]))
 
     wrong = N - correct
+    print(f"验证范围: #{start_i + 1}-#{end_i} / total {total}")
     print(f"总对话数: {N}")
     print(f"正确:     {correct} ({correct / N * 100:.1f}%)")
     print(f"错误:     {wrong} ({wrong / N * 100:.1f}%)")
