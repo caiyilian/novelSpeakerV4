@@ -19,27 +19,9 @@ import argparse
 from typing import List, Optional, Tuple
 
 # ──────────────────────────── 默认黑名单 ────────────────────────────
-# 不要在这里添加任何新小说的名字！这些只针对当前项目已知的污染。
-# 切换小说时请删除此文件或使用 --roster 参数。
-DEFAULT_ROSTER: List[str] = [
-    "赫萝",
-    "罗伦斯",
-    "马贺特",
-    "叶勒",
-    "怀兹",
-    "杰廉",
-    "帕斯罗",
-    "约伊兹",
-    "贤狼",
-    "纽希拉",
-    "亚罗西史托",
-    "崔尼",
-    "梅迪欧",
-    "米隆",
-    "列支敦",
-    "优伦朵",
-    "佩连佐",
-]
+# Keep source code novel-agnostic. Put project-specific forbidden terms in an
+# external roster file and pass it with --roster.
+DEFAULT_ROSTER: List[str] = []
 
 # ──────────────────────────── 逻辑 ────────────────────────────
 
@@ -57,6 +39,8 @@ def scan_py_files(root: str, roster: List[str]) -> List[Tuple[str, int, str, str
     返回格式: [(文件路径, 行号, 匹配词, 行内容), ...]
     """
     violations: List[Tuple[str, int, str, str]] = []
+    if not roster:
+        return violations
     pattern = re.compile("|".join(re.escape(word) for word in roster))
 
     for dirpath, _dirnames, filenames in os.walk(root):
@@ -95,7 +79,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    root = args.path if args.path else os.path.join(os.path.dirname(__file__), "src")
+    root = args.path if args.path else os.path.dirname(__file__)
     roster = load_roster(args.roster)
 
     print(f"🔍 扫描目录: {root}")

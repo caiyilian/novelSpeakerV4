@@ -4,6 +4,9 @@ backup/
 
 # Config with server IP (sensitive)
 config/
+config/*key*
+*.key
+apikey.txt
 
 # Python cache
 __pycache__/
