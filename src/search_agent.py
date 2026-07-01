@@ -57,6 +57,15 @@ class SearchAgent:
         self.find_refs = find_refs_fn
         self.tool_call_count = 0
 
+    def _safe_print(self, msg):
+        """Print to stderr, which is more resilient on Windows."""
+        import sys
+        try:
+            sys.stderr.write(msg + "\n")
+            sys.stderr.flush()
+        except (ValueError, OSError):
+            pass
+
     def investigate(self, temp_name, around_line, max_tool_rounds=4, quiet=False):
         from run_label import TOOL_READ_NOVEL
         TOOL_DEEP_SEARCH = {
@@ -122,7 +131,7 @@ class SearchAgent:
             tool_call_log.append({
                 "round": round_i + 1,
                 "function": tool_calls[0].get("function", {}).get("name", ""),
-                "args": json.loads(tool_calls[0].get("function", {}).get("arguments", "{}")),
+                "args": tool_calls[0].get("function", {}).get("arguments", {}),
                 "pec": pec,
                 "ec": ec
             })
@@ -131,7 +140,7 @@ class SearchAgent:
 
             for tc in tool_calls:
                 func = tc.get("function", {})
-                raw_args = func.get("arguments", "{}")
+                raw_args = func.get("arguments", {})
                 func_args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
                 name = func.get("name", "")
 
@@ -141,7 +150,7 @@ class SearchAgent:
                     result = self.read_novel(s, c)
                     self.tool_call_count += 1
                     if not quiet:
-                        print(f"    [SearchAgent] read_novel_lines({s}-{s+c-1}) -> {len(result)} chars")
+                        self._safe_print(f"    [SearchAgent] read_novel_lines({s}-{s+c-1}) -> {len(result)} chars")
                     messages.append({"role": "tool", "content": result})
                 elif name == "deep_search_identity":
                     tn = func_args.get("temp_name", temp_name)
@@ -151,7 +160,7 @@ class SearchAgent:
                     result = self.deep_search(tn, al, fwd, bwd)
                     self.tool_call_count += 1
                     if not quiet:
-                        print(f"    [SearchAgent] deep_search('{tn}', around={al}) -> {len(result)} chars")
+                        self._safe_print(f"    [SearchAgent] deep_search('{tn}', around={al}) -> {len(result)} chars")
                     messages.append({"role": "tool", "content": result})
                 elif name == "find_all_references":
                     n = func_args.get("name", "")
@@ -159,11 +168,11 @@ class SearchAgent:
                     result = self.find_refs(n, mr)
                     self.tool_call_count += 1
                     if not quiet:
-                        print(f"    [SearchAgent] find_references('{n}') -> {len(result)} chars")
+                        self._safe_print(f"    [SearchAgent] find_references('{n}') -> {len(result)} chars")
                     messages.append({"role": "tool", "content": result})
         else:
             if not quiet:
-                print(f"    [SearchAgent] Max rounds ({max_tool_rounds})")
+                self._safe_print(f"    [SearchAgent] Max rounds ({max_tool_rounds})")
 
         result = self._parse_result(final_text)
         return result, total_pec, total_ec, tool_call_log

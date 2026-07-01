@@ -25,6 +25,7 @@ import requests
 import argparse
 import time
 from datetime import datetime
+from pathlib import Path
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(SCRIPT_DIR)
@@ -52,6 +53,370 @@ VAULT_PATH = os.path.join(ROOT_DIR, "data", "evidence_vault.json")
 # Token budget: stop searching when cumulative tokens exceed this
 TOKEN_BUDGET = 18000
 MAX_TOOL_ROUNDS = 10
+MODEL_PROVIDER = "ollama"
+API_MODEL_FILTER = ""
+API_CONTEXT_LIMIT = 40000
+API_MAX_OUTPUT_TOKENS = 2048
+
+
+class ModelCallError(RuntimeError):
+    pass
+
+
+class ApiModel:
+    def __init__(self, name, model, base_url, api_key="", min_interval=1.5, tool_capable=True):
+        self.name = name
+        self.model = model
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
+        self.min_interval = min_interval
+        self.tool_capable = tool_capable
+        self.last_call_at = 0.0
+        self.cooldown_until = 0.0
+        self.last_error = ""
+        self.disabled = False
+
+    @property
+    def label(self):
+        return f"{self.name}/{self.model}"
+
+    @property
+    def chat_url(self):
+        if self.base_url.endswith("/chat/completions"):
+            return self.base_url
+        if self.base_url.endswith("/v1") or self.base_url.endswith("/paas/v4"):
+            return f"{self.base_url}/chat/completions"
+        return f"{self.base_url}/v1/chat/completions"
+
+    def wait_for_slot(self):
+        delay = self.min_interval - (time.time() - self.last_call_at)
+        if delay > 0:
+            time.sleep(delay)
+
+    def mark_failure(self, message, cooldown=30):
+        self.last_error = message[:200]
+        self.cooldown_until = time.time() + cooldown
+        if "HTTP 401" in message or "HTTP 403" in message:
+            self.disabled = True
+
+    def available(self, needs_tools):
+        if self.disabled:
+            return False
+        if needs_tools and not self.tool_capable:
+            return False
+        return time.time() >= self.cooldown_until
+
+
+API_MODELS = []
+
+
+def _load_opencode_provider(provider_name):
+    path = Path.home() / ".config" / "opencode" / "opencode.jsonc"
+    if not path.exists():
+        return None
+    try:
+        raw = path.read_text(encoding="utf-8")
+        lines = [line for line in raw.splitlines() if not line.strip().startswith("//")]
+        data = json.loads("\n".join(lines))
+        return data.get("provider", {}).get(provider_name)
+    except Exception:
+        return None
+
+
+def _extract_api_key_from_python(path, var_name="API_KEY"):
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return ""
+    pattern = rf'{re.escape(var_name)}\s*=\s*["\']([^"\']+)["\']'
+    match = re.search(pattern, text)
+    return match.group(1) if match else ""
+
+
+def _load_zhipu_key():
+    for env_name in ("ZHIPUAI_API_KEY", "ZHIPU_API_KEY", "BIGMODEL_API_KEY"):
+        value = os.environ.get(env_name)
+        if value:
+            return value
+    key_file = os.environ.get("ZHIPUAI_API_KEY_FILE")
+    if key_file:
+        key = _extract_api_key_from_python(key_file)
+        if key:
+            return key
+        try:
+            return Path(key_file).read_text(encoding="utf-8").strip()
+        except OSError:
+            return ""
+    free_api_root = os.environ.get("FREE_API_ROOT") or str(Path(ROOT_DIR).parent / "free-api")
+    return _extract_api_key_from_python(Path(free_api_root) / "tests" / "test_zhipu.py")
+
+
+def _read_key_file(path):
+    try:
+        return Path(path).read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _load_agnes_key():
+    value = os.environ.get("AGNES_API_KEY")
+    if value:
+        return value.strip()
+    key_file = os.environ.get("AGNES_API_KEY_FILE")
+    if key_file:
+        return _read_key_file(key_file)
+    local_key_file = Path(ROOT_DIR) / "config" / "agnes_api_key"
+    if local_key_file.exists():
+        return _read_key_file(local_key_file)
+    provider = _load_opencode_provider("agnes")
+    if provider:
+        return (provider.get("options", {}).get("apiKey") or "").strip()
+    return ""
+
+
+def _build_api_models():
+    models = []
+    zhipu_key = _load_zhipu_key()
+    if zhipu_key:
+        base = "https://open.bigmodel.cn/api/paas/v4"
+        models.extend([
+            ApiModel("zhipu", "GLM-4-Flash-250414", base, zhipu_key, min_interval=1.5, tool_capable=True),
+            ApiModel("zhipu", "GLM-4-Flash", base, zhipu_key, min_interval=1.5, tool_capable=True),
+            ApiModel("zhipu", "GLM-4.1V-Thinking-Flash", base, zhipu_key, min_interval=1.5, tool_capable=False),
+            ApiModel("zhipu", "GLM-4.6V-Flash", base, zhipu_key, min_interval=3.0, tool_capable=True),
+        ])
+
+    for provider_name, model_name, min_interval in [
+        ("longcat", "LongCat-2.0", 2.0),
+        ("sense-nova", "sensenova-6.7-flash-lite", 1.5),
+    ]:
+        provider = _load_opencode_provider(provider_name)
+        if not provider:
+            continue
+        opts = provider.get("options", {})
+        base_url = opts.get("baseURL", "")
+        api_key = opts.get("apiKey", "")
+        configured_models = provider.get("models", {})
+        if base_url and api_key and model_name in configured_models:
+            models.append(ApiModel(provider_name, model_name, base_url, api_key,
+                                   min_interval=min_interval, tool_capable=True))
+    agnes_key = _load_agnes_key()
+    if agnes_key:
+        models.append(ApiModel("agnes", "agnes-2.0-flash", "https://apihub.agnes-ai.com/v1",
+                               agnes_key, min_interval=1.5, tool_capable=True))
+    if API_MODEL_FILTER:
+        lowered = API_MODEL_FILTER.lower()
+        exact_models = [
+            model for model in models
+            if lowered == model.label.lower() or lowered == model.model.lower() or lowered == model.name.lower()
+        ]
+        if exact_models:
+            models = exact_models
+        else:
+            models = [
+                model for model in models
+                if lowered in model.label.lower() or lowered in model.model.lower() or lowered in model.name.lower()
+            ]
+    return models
+
+
+def _message_content(message):
+    return (message.get("content") or message.get("reasoning") or
+            message.get("reasoning_content") or "")
+
+
+def _estimate_message_tokens(messages):
+    total = 0
+    for msg in messages:
+        content = msg.get("content") or ""
+        total += len(content)
+        for tc in msg.get("tool_calls") or []:
+            total += len(json.dumps(tc, ensure_ascii=False))
+    return total
+
+
+def _openai_messages(messages):
+    converted = []
+    pending_tool_ids = []
+    for msg in messages:
+        role = msg.get("role")
+        item = {"role": role, "content": msg.get("content") or ""}
+        if role == "assistant" and msg.get("tool_calls"):
+            item["tool_calls"] = msg["tool_calls"]
+            pending_tool_ids = [tc.get("id") for tc in msg["tool_calls"] if tc.get("id")]
+        elif role == "tool":
+            if pending_tool_ids:
+                item["tool_call_id"] = pending_tool_ids.pop(0)
+            else:
+                item["tool_call_id"] = "tool_call_0"
+        converted.append(item)
+    return converted
+
+
+def _api_chat(model, messages, tools=None, tool_choice="auto"):
+    estimated_tokens = _estimate_message_tokens(messages)
+    if estimated_tokens + API_MAX_OUTPUT_TOKENS > API_CONTEXT_LIMIT:
+        raise ModelCallError(
+            f"context budget exceeded: estimated {estimated_tokens + API_MAX_OUTPUT_TOKENS} > {API_CONTEXT_LIMIT}"
+        )
+    model.wait_for_slot()
+    headers = {"Content-Type": "application/json"}
+    if model.api_key:
+        headers["Authorization"] = model.api_key if model.api_key.lower().startswith("bearer ") else f"Bearer {model.api_key}"
+    payload = {
+        "model": model.model,
+        "messages": _openai_messages(messages),
+        "temperature": 0,
+        "max_tokens": API_MAX_OUTPUT_TOKENS,
+    }
+    if tools:
+        payload["tools"] = tools
+        payload["tool_choice"] = tool_choice
+    resp = requests.post(model.chat_url, headers=headers, json=payload, timeout=300)
+    model.last_call_at = time.time()
+    if resp.status_code == 429:
+        model.mark_failure("rate limited", cooldown=120)
+        raise ModelCallError(f"{model.label}: HTTP 429 rate limited")
+    if resp.status_code >= 500:
+        model.mark_failure(f"HTTP {resp.status_code}", cooldown=60)
+        raise ModelCallError(f"{model.label}: HTTP {resp.status_code}")
+    if resp.status_code >= 400:
+        model.mark_failure(f"HTTP {resp.status_code}", cooldown=300)
+        raise ModelCallError(f"{model.label}: HTTP {resp.status_code}: {resp.text[:200]}")
+    data = resp.json()
+    choice = (data.get("choices") or [{}])[0]
+    msg = choice.get("message") or {}
+    text = _message_content(msg)
+    provider_fields = msg.get("provider_specific_fields") or {}
+    tool_calls = msg.get("tool_calls") or provider_fields.get("tool_calls") or []
+    usage = data.get("usage") or {}
+    pec = usage.get("prompt_tokens", 0)
+    ec = usage.get("completion_tokens", 0)
+    return text, pec, ec, tool_calls
+
+
+def _health_check_model(model, needs_tools):
+    messages = [{"role": "user", "content": "只回复 OK"}]
+    _api_chat(model, messages)
+    if not needs_tools:
+        return True
+    test_tool = {
+        "type": "function",
+        "function": {
+            "name": "read_novel_lines",
+            "description": "Read lines from novel text.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "start": {"type": "integer"},
+                    "count": {"type": "integer"},
+                },
+                "required": ["start", "count"],
+            },
+        },
+    }
+    tool_messages = [
+        {"role": "system", "content": "You are a tool-using assistant. Call tools when asked."},
+        {"role": "user", "content": "Call the tool read_novel_lines with start=1 and count=1. Do not answer in text."},
+    ]
+    _, _, _, tool_calls = _api_chat(model, tool_messages, tools=[test_tool], tool_choice="auto")
+    if not tool_calls:
+        raise ModelCallError(f"{model.label}: chat works but tool calls are unsupported")
+    return True
+
+
+def init_api_fallback():
+    global API_MODELS
+    API_MODELS = _build_api_models()
+    if not API_MODELS:
+        raise ModelCallError("No API fallback models configured. Set ZHIPUAI_API_KEY or configure opencode providers.")
+
+    print("  API fallback health check:")
+    usable = []
+    for model in API_MODELS:
+        needs_tools = model.tool_capable
+        try:
+            _health_check_model(model, needs_tools=needs_tools)
+            if needs_tools:
+                usable.append(model)
+                print(f"    OK   {model.label} (chat + tools)")
+            else:
+                print(f"    CHAT {model.label} (chat only, skipped for tool rounds)")
+        except Exception as exc:
+            model.mark_failure(str(exc), cooldown=300)
+            print(f"    FAIL {model.label} ({str(exc)[:100]})")
+    if not usable:
+        raise ModelCallError("All tool-capable API fallback models failed health checks.")
+
+
+def _expects_tool_call(messages, tools):
+    if not tools:
+        return False
+    if any(msg.get("role") == "tool" for msg in messages):
+        return False
+    last_user = ""
+    for msg in reversed(messages):
+        if msg.get("role") == "user":
+            last_user = msg.get("content") or ""
+            break
+    forced_markers = (
+        "MUST call read_novel_lines",
+        "Call the tool read_novel_lines",
+        "Call read_novel_lines",
+    )
+    return any(marker in last_user for marker in forced_markers)
+
+
+def _coerce_text_tool_call(text, tools):
+    if not text or not tools:
+        return []
+    tool_names = {tool.get("function", {}).get("name") for tool in tools}
+    if "read_novel_lines" in tool_names:
+        match = re.search(r"read_novel_lines\s*\(\s*(\d+)\s*,\s*(\d+)\s*\)", text)
+        if match:
+            args = {"start": int(match.group(1)), "count": int(match.group(2))}
+            return [{
+                "id": "text_tool_read_novel_lines",
+                "type": "function",
+                "function": {"name": "read_novel_lines", "arguments": json.dumps(args, ensure_ascii=False)},
+            }]
+    if "search_novel" in tool_names:
+        match = re.search(r"search_novel\s*\(\s*['\"]([^'\"]+)['\"]\s*(?:,\s*(\d+))?\s*\)", text)
+        if match:
+            args = {"keyword": match.group(1)}
+            if match.group(2):
+                args["context_lines"] = int(match.group(2))
+            return [{
+                "id": "text_tool_search_novel",
+                "type": "function",
+                "function": {"name": "search_novel", "arguments": json.dumps(args, ensure_ascii=False)},
+            }]
+    return []
+
+
+def call_api_fallback(messages, tools=None, label=""):
+    needs_tools = bool(tools)
+    expects_tool = _expects_tool_call(messages, tools)
+    errors = []
+    for model in API_MODELS:
+        if not model.available(needs_tools):
+            continue
+        try:
+            tool_choice = "auto"
+            if expects_tool and model.name != "agnes":
+                tool_choice = {"type": "function", "function": {"name": "read_novel_lines"}}
+            text, pec, ec, tool_calls = _api_chat(model, messages, tools=tools, tool_choice=tool_choice)
+            if not tool_calls:
+                tool_calls = _coerce_text_tool_call(text, tools)
+            if expects_tool and not tool_calls:
+                errors.append(f"{model.label}: no tool call")
+                continue
+            return text, pec, ec, tool_calls
+        except Exception as exc:
+            errors.append(str(exc)[:160])
+            continue
+    detail = "; ".join(errors[-5:]) if errors else "no model available outside cooldown"
+    raise ModelCallError(f"All API fallback models failed for {label or 'request'}: {detail}")
 
 # Temporary descriptors that need forward name search
 TEMP_DESCRIPTORS = {"女孩", "少年", "老人", "大汉", "年轻人", "男孩", "少女", "妇人", "老妇", "男子", "女子", "青年", "孩子"}
@@ -59,6 +424,7 @@ TEMP_DESCRIPTORS = {"女孩", "少年", "老人", "大汉", "年轻人", "男孩
 # Forward search patterns for name reveal (must be actual name-introduction, not generic "I am X")
 # Priority order: longer patterns first to avoid partial matches
 NAME_REVEAL_PATTERNS = ["咱的名字是", "我的名字是", "吾乃", "名字是"]
+NAME_TERMINATORS = set("「」『』\"'。，！？、，：:；;）)] \t\r\n")
 
 
 def search_forward_for_name(line_num, descriptor):
@@ -82,7 +448,7 @@ def search_forward_for_name(line_num, descriptor):
                 # Extract name: take chars until we hit punctuation or non-name chars
                 raw_name = ""
                 for ch in line[idx:]:
-                    if ch in '「」『』""''。，！？、，：:；;）\)\]\s':
+                    if ch in NAME_TERMINATORS:
                         break
                     raw_name += ch
                 # Validate: Chinese name is 2-4 chars
@@ -148,13 +514,18 @@ def read_novel_lines(start, count):
     return "\n".join(result)
 
 
-def search_novel(keyword, context_lines=1):
-    """Search novel.txt for a keyword. Returns matching lines with context."""
+def search_novel(keyword, context_lines=1, max_matches=8, max_chars=12000):
+    """Search novel.txt for a keyword. Returns bounded matching lines with context."""
     with open(NOVEL_PATH, "r", encoding="utf-8") as f:
         lines = f.readlines()
     results = []
+    total_matches = 0
+    context_lines = max(0, min(int(context_lines or 1), 5))
     for i, line in enumerate(lines):
         if keyword in line:
+            total_matches += 1
+            if len(results) >= max_matches:
+                continue
             ctx_start = max(0, i - context_lines)
             ctx_end = min(len(lines), i + context_lines + 1)
             block = []
@@ -162,7 +533,14 @@ def search_novel(keyword, context_lines=1):
                 marker = ">>>" if j == i else "   "
                 block.append(f"{marker}{j+1}: {lines[j].rstrip()}")
             results.append("\n".join(block))
-    return "\n---\n".join(results) if results else f"(No matches for '{keyword}')"
+    if not results:
+        return f"(No matches for '{keyword}')"
+    output = "\n---\n".join(results)
+    if len(output) > max_chars:
+        output = output[:max_chars] + "\n...(search result truncated; use a narrower keyword or read_novel_lines around a specific line)"
+    if total_matches > len(results):
+        output += f"\n...(showing first {len(results)} of {total_matches} matches; use a narrower keyword or read_novel_lines around a specific line)"
+    return output
 
 
 def get_narrative_before(line_num, max_lines=5):
@@ -315,6 +693,9 @@ def write_label(name):
 
 
 def call_ollama(messages, tools=None, label=""):
+    if MODEL_PROVIDER == "api-fallback":
+        return call_api_fallback(messages, tools=tools, label=label)
+
     url = f"{OLLAMA_BASE_URL}/api/chat"
     payload = {
         "model": OLLAMA_MODEL,
@@ -1229,6 +1610,7 @@ Call read_novel_lines to verify. Form your own conclusion first, then compare.
             text, pec, ec, tool_calls = call_ollama(messages, tools=[TOOL_READ_NOVEL], label=f"Verifier-R{round_i+1}")
             if not tool_calls:
                 break
+            messages.append({"role": "assistant", "content": text, "tool_calls": tool_calls})
             for tc in tool_calls:
                 func = tc.get("function", {})
                 raw_args = func.get("arguments", "{}")
@@ -1239,7 +1621,6 @@ Call read_novel_lines to verify. Form your own conclusion first, then compare.
                     result = read_novel_lines(s, c)
                     self.tool_call_count += 1
                     messages.append({"role": "tool", "content": result})
-            messages.append({"role": "assistant", "content": text, "tool_calls": tool_calls})
 
         # Parse verdict
         verdict = "confirm"
@@ -1520,21 +1901,38 @@ def _writeline(msg):
 
 
 def main():
+    global API_MODEL_FILTER, MODEL_PROVIDER
     parser = argparse.ArgumentParser(description="Multi-agent novel dialogue speaker annotation v4")
     parser.add_argument("--start", type=int, default=0, help="Start from dialogue index (0=resume)")
     parser.add_argument("--count", type=int, default=1, help="Number of dialogues to annotate")
     parser.add_argument("--short-mem", type=int, default=20, help="Short-term memory rounds")
     parser.add_argument("--validate", action="store_true", help="Run validation after annotation")
     parser.add_argument("--reset-state", action="store_true", help="Reset character state before starting")
+    parser.add_argument("--provider", choices=["ollama", "api-fallback"], default=os.environ.get("NOVEL_MODEL_PROVIDER", "ollama"),
+                        help="Model provider: ollama or api-fallback")
+    parser.add_argument("--api-model", default=os.environ.get("NOVEL_API_MODEL", ""),
+                        help="When using api-fallback, restrict calls to one provider/model substring")
     args = parser.parse_args()
+    MODEL_PROVIDER = args.provider
+    API_MODEL_FILTER = args.api_model.strip()
 
     print("=" * 60)
     print("  Multi-agent Novel Dialogue Speaker Annotation v4")
-    print(f"  Model: {OLLAMA_MODEL}")
-    print(f"  Server: {OLLAMA_BASE_URL}")
+    print(f"  Provider: {MODEL_PROVIDER}")
+    if MODEL_PROVIDER == "ollama":
+        print(f"  Model: {OLLAMA_MODEL}")
+        print(f"  Server: {OLLAMA_BASE_URL}")
+    else:
+        print(f"  API context limit: {API_CONTEXT_LIMIT}")
+        print(f"  API max output tokens: {API_MAX_OUTPUT_TOKENS}")
+        if API_MODEL_FILTER:
+            print(f"  API model filter: {API_MODEL_FILTER}")
     print(f"  Short-term memory: {args.short_mem} rounds")
     print(f"  Token budget: {TOKEN_BUDGET}")
     print(f"  Max tool rounds: {MAX_TOOL_ROUNDS}")
+
+    if MODEL_PROVIDER == "api-fallback":
+        init_api_fallback()
 
     # Roster check
     try:
