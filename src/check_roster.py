@@ -9,7 +9,7 @@
 用法：
   python check_roster.py [--path <目录>] [--roster <名单文件>]
 
-默认扫描 src/ 目录，使用内置名单。
+默认扫描 src/ 目录，优先使用 config/forbidden_terms.txt。
 """
 
 import os
@@ -19,18 +19,30 @@ import argparse
 from typing import List, Optional, Tuple
 
 # ──────────────────────────── 默认黑名单 ────────────────────────────
-# Keep source code novel-agnostic. Put project-specific forbidden terms in an
-# external roster file and pass it with --roster.
+# Keep source code novel-agnostic. Do not put project-specific character names
+# here. Put them in config/forbidden_terms.txt or pass a roster with --roster.
 DEFAULT_ROSTER: List[str] = []
+DEFAULT_ROSTER_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "config",
+    "forbidden_terms.txt",
+)
 
 # ──────────────────────────── 逻辑 ────────────────────────────
 
 def load_roster(path: Optional[str]) -> List[str]:
-    """从文件读取名单，每行一个词；否则使用内置默认名单。"""
+    """从文件读取名单，每行一个词；否则使用私有默认名单。"""
     if path is None:
-        return DEFAULT_ROSTER
+        if os.path.exists(DEFAULT_ROSTER_PATH):
+            path = DEFAULT_ROSTER_PATH
+        else:
+            return DEFAULT_ROSTER
     with open(path, "r", encoding="utf-8") as f:
-        return [line.strip() for line in f if line.strip()]
+        return [
+            line.strip()
+            for line in f
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
 
 
 def scan_py_files(root: str, roster: List[str]) -> List[Tuple[str, int, str, str]]:
