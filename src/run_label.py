@@ -57,6 +57,7 @@ MODEL_PROVIDER = "ollama"
 API_MODEL_FILTER = ""
 API_CONTEXT_LIMIT = 40000
 API_MAX_OUTPUT_TOKENS = 2048
+API_CALL_TRACE = []
 
 
 class ModelCallError(RuntimeError):
@@ -176,34 +177,41 @@ def _load_agnes_key():
 
 def _build_api_models():
     models = []
+
+    # Priority is intentional, not random. Keep low-context models such as
+    # GLM-4V-Flash (16K) out of this pool because experiments target 40K.
+    sense_provider = _load_opencode_provider("sense-nova")
+    if sense_provider:
+        opts = sense_provider.get("options", {})
+        configured_models = sense_provider.get("models", {})
+        if "sensenova-6.7-flash-lite" in configured_models:
+            models.append(ApiModel("sense-nova", "sensenova-6.7-flash-lite",
+                                   opts.get("baseURL", ""), opts.get("apiKey", ""),
+                                   min_interval=1.5, tool_capable=True))
+
+    longcat_provider = _load_opencode_provider("longcat")
+    if longcat_provider:
+        opts = longcat_provider.get("options", {})
+        configured_models = longcat_provider.get("models", {})
+        if "LongCat-2.0" in configured_models:
+            models.append(ApiModel("longcat", "LongCat-2.0",
+                                   opts.get("baseURL", ""), opts.get("apiKey", ""),
+                                   min_interval=2.0, tool_capable=True))
+
+    agnes_key = _load_agnes_key()
+    if agnes_key:
+        models.append(ApiModel("agnes", "agnes-2.0-flash", "https://apihub.agnes-ai.com/v1",
+                               agnes_key, min_interval=1.5, tool_capable=True))
+
     zhipu_key = _load_zhipu_key()
     if zhipu_key:
         base = "https://open.bigmodel.cn/api/paas/v4"
         models.extend([
             ApiModel("zhipu", "GLM-4-Flash-250414", base, zhipu_key, min_interval=1.5, tool_capable=True),
             ApiModel("zhipu", "GLM-4-Flash", base, zhipu_key, min_interval=1.5, tool_capable=True),
-            ApiModel("zhipu", "GLM-4.1V-Thinking-Flash", base, zhipu_key, min_interval=1.5, tool_capable=False),
             ApiModel("zhipu", "GLM-4.6V-Flash", base, zhipu_key, min_interval=3.0, tool_capable=True),
         ])
 
-    for provider_name, model_name, min_interval in [
-        ("longcat", "LongCat-2.0", 2.0),
-        ("sense-nova", "sensenova-6.7-flash-lite", 1.5),
-    ]:
-        provider = _load_opencode_provider(provider_name)
-        if not provider:
-            continue
-        opts = provider.get("options", {})
-        base_url = opts.get("baseURL", "")
-        api_key = opts.get("apiKey", "")
-        configured_models = provider.get("models", {})
-        if base_url and api_key and model_name in configured_models:
-            models.append(ApiModel(provider_name, model_name, base_url, api_key,
-                                   min_interval=min_interval, tool_capable=True))
-    agnes_key = _load_agnes_key()
-    if agnes_key:
-        models.append(ApiModel("agnes", "agnes-2.0-flash", "https://apihub.agnes-ai.com/v1",
-                               agnes_key, min_interval=1.5, tool_capable=True))
     if API_MODEL_FILTER:
         lowered = API_MODEL_FILTER.lower()
         exact_models = [
@@ -395,6 +403,7 @@ def _coerce_text_tool_call(text, tools):
 
 
 def call_api_fallback(messages, tools=None, label=""):
+    global API_CALL_TRACE
     needs_tools = bool(tools)
     expects_tool = _expects_tool_call(messages, tools)
     errors = []
@@ -406,11 +415,25 @@ def call_api_fallback(messages, tools=None, label=""):
             if expects_tool and model.name != "agnes":
                 tool_choice = {"type": "function", "function": {"name": "read_novel_lines"}}
             text, pec, ec, tool_calls = _api_chat(model, messages, tools=tools, tool_choice=tool_choice)
+            coerced_tool_call = False
             if not tool_calls:
                 tool_calls = _coerce_text_tool_call(text, tools)
+                coerced_tool_call = bool(tool_calls)
             if expects_tool and not tool_calls:
                 errors.append(f"{model.label}: no tool call")
                 continue
+            API_CALL_TRACE.append({
+                "label": label,
+                "provider": model.name,
+                "model": model.model,
+                "model_label": model.label,
+                "tools_enabled": bool(tools),
+                "tool_choice": tool_choice,
+                "tool_calls": len(tool_calls),
+                "coerced_text_tool_call": coerced_tool_call,
+                "prompt_eval_count": pec,
+                "eval_count": ec,
+            })
             return text, pec, ec, tool_calls
         except Exception as exc:
             errors.append(str(exc)[:160])
@@ -486,6 +509,7 @@ def new_round(round_idx, line_num, dialogue):
 
 def log_agent(round_log, agent_name, role, input_messages, response_text, pec, ec,
                tool_calls_list=None, total_pec=None, total_ec=None):
+    global API_CALL_TRACE
     entry = {
         "agent": agent_name,
         "role": role,
@@ -497,6 +521,9 @@ def log_agent(round_log, agent_name, role, input_messages, response_text, pec, e
     }
     if tool_calls_list:
         entry["tool_calls_detail"] = tool_calls_list
+    if API_CALL_TRACE:
+        entry["model_calls"] = API_CALL_TRACE
+        API_CALL_TRACE = []
     round_log["agents"][agent_name] = entry
 
 
@@ -1553,8 +1580,16 @@ class VerifierAgent:
     def __init__(self):
         self.tool_call_count = 0
 
+    def _safe_print(self, msg):
+        try:
+            sys.stderr.write(msg + "\n")
+            sys.stderr.flush()
+        except (ValueError, OSError):
+            pass
+
     def verify(self, line_num, dialogue, navigation_text, short_mem_text,
-               scene_summary, char_state_text, labeler_speaker, round_log, quiet=False):
+               scene_summary, char_state_text, labeler_speaker, round_log, quiet=False,
+               risk_reasons=None):
         """
         Independent verification. Returns (verdict, suggested_speaker, reason).
         verdict: "confirm" or "disagree"
@@ -1571,19 +1606,27 @@ RULES:
 - Read the novel text independently using read_novel_lines
 - Form your OWN conclusion about who is speaking
 - Then compare with the primary answer
+- First classify the quote type: direct_speech, quote_or_letter, password_or_signal, sound_effect, thought_not_spoken, or unclear
+- For quote_or_letter/password_or_signal/sound_effect/thought_not_spoken, be careful: the correct label may be non-person, a signal, or the source text rather than the nearby character
+- For rapid two-person exchanges, do not rely on alternation alone; cite the local narrative or adjacent dialogue structure
 - If you agree, output <verdict>confirm</verdict>
 - If you disagree, output <verdict>disagree</verdict> and provide your suggested speaker
 
 OUTPUT:
+<quote_type>type</quote_type>
 <verdict>confirm</verdict> or <verdict>disagree</verdict>
 <suggested_speaker>name</suggested_speaker>
 <reason>your evidence citing specific line numbers</reason>"""
 
+        risk_text = "\n".join(f"- {r}" for r in (risk_reasons or [])) or "(none)"
         user_content = f"""Verify the speaker of this dialogue:
 
 Line {line_num}: 「{dialogue}」
 
 Primary annotator's answer: {labeler_speaker}
+
+Risk reasons that triggered verification:
+{risk_text}
 
 ========================================
 Original text navigation:
@@ -1605,9 +1648,17 @@ Call read_novel_lines to verify. Form your own conclusion first, then compare.
             {"role": "user", "content": user_content}
         ]
 
-        # Allow up to 1 tool round for quick verification
-        for round_i in range(1):
+        total_pec = 0
+        total_ec = 0
+        tool_call_log = []
+        text = ""
+
+        # Allow tool read + final verdict. Some APIs need a second model turn
+        # after the tool result before they can produce the verdict.
+        for round_i in range(3):
             text, pec, ec, tool_calls = call_ollama(messages, tools=[TOOL_READ_NOVEL], label=f"Verifier-R{round_i+1}")
+            total_pec += pec
+            total_ec += ec
             if not tool_calls:
                 break
             messages.append({"role": "assistant", "content": text, "tool_calls": tool_calls})
@@ -1620,7 +1671,19 @@ Call read_novel_lines to verify. Form your own conclusion first, then compare.
                     c = func_args.get("count", 10)
                     result = read_novel_lines(s, c)
                     self.tool_call_count += 1
+                    tool_call_log.append({
+                        "round": round_i + 1,
+                        "function": "read_novel_lines",
+                        "args": {"start": s, "count": c},
+                        "prompt_eval_count": pec,
+                        "eval_count": ec,
+                    })
                     messages.append({"role": "tool", "content": result})
+            messages.append({"role": "user", "content": "Now output <quote_type>, <verdict>, <suggested_speaker>, and <reason> based on the tool result."})
+
+        log_agent(round_log, "Verifier", "verifier", messages, text, pec if 'pec' in locals() else 0,
+                  ec if 'ec' in locals() else 0, tool_calls_list=tool_call_log if tool_call_log else None,
+                  total_pec=total_pec, total_ec=total_ec)
 
         # Parse verdict
         verdict = "confirm"
@@ -1654,6 +1717,7 @@ Call read_novel_lines to verify. Form your own conclusion first, then compare.
 class Boss:
     def __init__(self, short_mem_rounds=20):
         self.labeler = LabelerAgent()
+        self.verifier = VerifierAgent()
         self.short_mem = ShortMemAgent(max_rounds=short_mem_rounds)
         self.dialogue_list = get_dialogue_list()
         self.total_tokens = 0
@@ -1710,6 +1774,29 @@ class Boss:
             sys.stderr.flush()
         except (ValueError, OSError):
             pass
+
+    def _is_short_or_fragment(self, dialogue):
+        text = (dialogue or "").strip()
+        han_count = len(re.findall(r"[\u4e00-\u9fff]", text))
+        return len(text) <= 12 or han_count <= 4
+
+    def _risk_reasons(self, speaker, dialogue, tool_rounds_used, next_expected):
+        """Return generic risk reasons that should trigger independent review."""
+        reasons = []
+        normalized = (speaker or "").strip()
+
+        if normalized in TEMP_DESCRIPTORS:
+            reasons.append("speaker is a temporary descriptor and may need identity verification")
+        if normalized in ("非人物发声", "non-human"):
+            reasons.append("speaker is non-person; quote type should be verified")
+        if next_expected and normalized and normalized != next_expected:
+            reasons.append("speaker conflicts with recent two-person exchange expectation")
+        if self.short_mem.detect_rapid_exchange(4) and self._is_short_or_fragment(dialogue):
+            reasons.append("short or fragmentary line inside a rapid exchange")
+        if tool_rounds_used <= 1 and self._is_short_or_fragment(dialogue):
+            reasons.append("low evidence depth for a short or fragmentary line")
+
+        return reasons
 
     def process_one(self, line_num, dialogue, round_log, quiet=False):
         self.round_count += 1
@@ -1809,6 +1896,33 @@ class Boss:
         # 8. Fallback
         if not speaker:
             speaker = "?"
+
+        # 8b. Generic risk review. This deliberately avoids novel-specific
+        # names or organizations; it only checks ambiguity patterns that occur
+        # across novels.
+        risk_reasons = self._risk_reasons(speaker, dialogue, tool_rounds_used, next_exp)
+        if risk_reasons:
+            if not quiet:
+                self._safe_print(f"  Risk review: {', '.join(risk_reasons)}")
+            verdict, suggested, verifier_reason = self.verifier.verify(
+                line_num, dialogue, navigation_text, short_mem_text,
+                "", evidence_text, speaker, round_log, quiet=quiet,
+                risk_reasons=risk_reasons
+            )
+            round_log["risk_review"] = {
+                "reasons": risk_reasons,
+                "verdict": verdict,
+                "suggested": suggested,
+                "reason": verifier_reason,
+            }
+            if verdict == "disagree" and suggested and suggested != speaker:
+                old_speaker = speaker
+                speaker = suggested
+                corrected = True
+                self.corrections += 1
+                reason_text = f"{reason_text} | RiskVerifier corrected {old_speaker} -> {speaker}: {verifier_reason}".strip()
+                if not quiet:
+                    self._safe_print(f"  RiskVerifier corrected: {old_speaker} -> {speaker}")
 
         # 9. Write to labeled.txt
         write_label(speaker)
@@ -1937,18 +2051,20 @@ def main():
     # Roster check
     try:
         sys.path.insert(0, SCRIPT_DIR)
-        from check_roster import scan_py_files, DEFAULT_ROSTER
-        violations = scan_py_files(SCRIPT_DIR, DEFAULT_ROSTER)
+        from check_roster import load_roster, scan_py_files
+        roster = load_roster(None)
+        violations = scan_py_files(SCRIPT_DIR, roster)
         if violations:
-            print(f"\nWARNING: {len(violations)} character name leaks found in .py files:")
+            print(f"\nERROR: {len(violations)} novel-specific name leaks found in .py files:")
             for fp, lineno, word, line in violations[:10]:
                 rel = os.path.relpath(fp, ROOT_DIR)
                 print(f"  {rel}:L{lineno} matched '{word}'")
             if len(violations) > 10:
                 print(f"  ... and {len(violations)-10} more")
-            print("  Please remove novel-specific names for generality.\n")
+            print("  Remove hardcoded novel-specific names before running annotation.\n")
+            sys.exit(2)
         else:
-            print("  Roster check: PASSED (no leaks)")
+            print(f"  Roster check: PASSED (no leaks, terms={len(roster)})")
     except ImportError:
         pass
 
