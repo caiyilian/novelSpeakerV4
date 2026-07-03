@@ -21,9 +21,11 @@ import sys
 import os
 import re
 import json
+import ast
 import requests
 import argparse
 import time
+import traceback
 from datetime import datetime
 from pathlib import Path
 
@@ -43,21 +45,61 @@ if os.path.exists(CONFIG_PATH):
             elif line.startswith("OLLAMA_MODEL="):
                 OLLAMA_MODEL = line.split("=", 1)[1]
 
-NOVEL_PATH = os.path.join(ROOT_DIR, "data", "novel.txt")
-LABELED_PATH = os.path.join(ROOT_DIR, "data", "labeled.txt")
-ANSWERS_PATH = os.path.join(ROOT_DIR, "data", "answers.txt")
-LOG_PATH = os.path.join(ROOT_DIR, "data", "label_log.jsonl")
-STATE_PATH = os.path.join(ROOT_DIR, "data", "character_state.json")
-VAULT_PATH = os.path.join(ROOT_DIR, "data", "evidence_vault.json")
+DATA_DIR = os.path.join(ROOT_DIR, "data")
+NOVEL_PATH = os.path.join(DATA_DIR, "novel.txt")
+LABELED_PATH = os.path.join(DATA_DIR, "labeled.txt")
+ANSWERS_PATH = os.path.join(DATA_DIR, "answers.txt")
+LOG_PATH = os.path.join(DATA_DIR, "label_log.jsonl")
+TEMP_LOG_PATH = os.path.join(DATA_DIR, "label_log.temp.jsonl")
+STATE_PATH = os.path.join(DATA_DIR, "character_state.json")
+VAULT_PATH = os.path.join(DATA_DIR, "evidence_vault.json")
 
 # Token budget: stop searching when cumulative tokens exceed this
 TOKEN_BUDGET = 18000
 MAX_TOOL_ROUNDS = 10
 MODEL_PROVIDER = "ollama"
 API_MODEL_FILTER = ""
+API_MODEL_PRIORITY = []
 API_CONTEXT_LIMIT = 40000
 API_MAX_OUTPUT_TOKENS = 2048
 API_CALL_TRACE = []
+CURRENT_ROUND_TRACE = None
+SENSENOVA_MODEL = "sensenova-6.7-flash-lite"
+SENSENOVA_KEYS_PATH = os.path.join(ROOT_DIR, "config", "other_sensenova_apikeys")
+
+
+def _resolve_workspace_path(path_value):
+    if not path_value:
+        return ""
+    path = Path(path_value)
+    if not path.is_absolute():
+        path = Path(ROOT_DIR) / path
+    return str(path)
+
+
+def configure_paths(data_dir=None, novel_path=None, answers_path=None,
+                    labeled_path=None, log_path=None, state_path=None, vault_path=None):
+    """Configure per-run input/output paths so parallel volumes never share state."""
+    global DATA_DIR, NOVEL_PATH, LABELED_PATH, ANSWERS_PATH, LOG_PATH, TEMP_LOG_PATH, STATE_PATH, VAULT_PATH
+
+    if data_dir:
+        DATA_DIR = _resolve_workspace_path(data_dir)
+    else:
+        DATA_DIR = os.path.join(ROOT_DIR, "data")
+
+    Path(DATA_DIR).mkdir(parents=True, exist_ok=True)
+
+    NOVEL_PATH = _resolve_workspace_path(novel_path) if novel_path else os.path.join(DATA_DIR, "novel.txt")
+    ANSWERS_PATH = _resolve_workspace_path(answers_path) if answers_path else os.path.join(DATA_DIR, "answers.txt")
+    LABELED_PATH = _resolve_workspace_path(labeled_path) if labeled_path else os.path.join(DATA_DIR, "labeled.txt")
+    LOG_PATH = _resolve_workspace_path(log_path) if log_path else os.path.join(DATA_DIR, "label_log.jsonl")
+    log_base, log_ext = os.path.splitext(LOG_PATH)
+    TEMP_LOG_PATH = f"{log_base}.temp{log_ext or '.jsonl'}"
+    STATE_PATH = _resolve_workspace_path(state_path) if state_path else os.path.join(DATA_DIR, "character_state.json")
+    VAULT_PATH = _resolve_workspace_path(vault_path) if vault_path else os.path.join(DATA_DIR, "evidence_vault.json")
+
+    for output_path in (LABELED_PATH, LOG_PATH, TEMP_LOG_PATH, STATE_PATH, VAULT_PATH):
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
 
 class ModelCallError(RuntimeError):
@@ -65,13 +107,16 @@ class ModelCallError(RuntimeError):
 
 
 class ApiModel:
-    def __init__(self, name, model, base_url, api_key="", min_interval=1.5, tool_capable=True):
+    def __init__(self, name, model, base_url, api_key="", min_interval=1.5,
+                 tool_capable=True, display_model=None, use_env_proxy=True):
         self.name = name
         self.model = model
+        self.display_model = display_model or model
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.min_interval = min_interval
         self.tool_capable = tool_capable
+        self.use_env_proxy = use_env_proxy
         self.last_call_at = 0.0
         self.cooldown_until = 0.0
         self.last_error = ""
@@ -79,7 +124,7 @@ class ApiModel:
 
     @property
     def label(self):
-        return f"{self.name}/{self.model}"
+        return f"{self.name}/{self.display_model}"
 
     @property
     def chat_url(self):
@@ -175,19 +220,116 @@ def _load_agnes_key():
     return ""
 
 
+def _load_sensenova_keys():
+    key_file = os.environ.get("SENSENOVA_API_KEYS_FILE") or SENSENOVA_KEYS_PATH
+    try:
+        lines = Path(key_file).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+
+    keys = []
+    seen = set()
+    for line in lines:
+        item = line.strip()
+        if not item or item.startswith("#"):
+            continue
+        if item in seen:
+            continue
+        seen.add(item)
+        keys.append(item)
+    return keys
+
+
+def _suffix_name(index):
+    return str(index + 1)
+
+
+def _append_sensenova_models(models):
+    provider = _load_opencode_provider("sense-nova")
+    if not provider:
+        return
+
+    opts = provider.get("options", {}) or {}
+    configured_models = provider.get("models", {}) or {}
+    base_url = opts.get("baseURL", "") or opts.get("baseUrl", "") or opts.get("base_url", "")
+    if SENSENOVA_MODEL not in configured_models or not base_url:
+        return
+
+    model_conf = configured_models.get(SENSENOVA_MODEL) or {}
+    actual_model = model_conf.get("id") or SENSENOVA_MODEL
+    use_env_proxy = os.environ.get("SENSENOVA_USE_ENV_PROXY", "").strip().lower() in {"1", "true", "yes", "on"}
+    file_keys = _load_sensenova_keys()
+    if file_keys:
+        for index, api_key in enumerate(file_keys):
+            suffix = _suffix_name(index)
+            models.append(ApiModel(
+                f"sense-nova-{suffix}",
+                actual_model,
+                base_url,
+                api_key,
+                min_interval=1.5,
+                tool_capable=True,
+                display_model=f"{SENSENOVA_MODEL}-{suffix}",
+                use_env_proxy=use_env_proxy,
+            ))
+        return
+
+    api_key = opts.get("apiKey", "") or opts.get("api_key", "")
+    if api_key:
+        models.append(ApiModel("sense-nova", actual_model, base_url, api_key,
+                               min_interval=1.5, tool_capable=True,
+                               display_model=SENSENOVA_MODEL,
+                               use_env_proxy=use_env_proxy))
+
+
+def _model_matches_priority(model, priority_item):
+    item = (priority_item or "").strip().lower()
+    if not item:
+        return False
+    fields = (model.label.lower(), model.model.lower(), model.name.lower())
+    if item in fields:
+        return True
+    return any(item in field for field in fields)
+
+
+def _apply_api_priority(models):
+    if not API_MODEL_PRIORITY:
+        return models
+
+    ranked = []
+    for original_index, model in enumerate(models):
+        rank = len(API_MODEL_PRIORITY)
+        for priority_index, priority_item in enumerate(API_MODEL_PRIORITY):
+            if _model_matches_priority(model, priority_item):
+                rank = priority_index
+                break
+        ranked.append((rank, original_index, model))
+    ranked.sort(key=lambda item: (item[0], item[1]))
+    return [model for _, _, model in ranked]
+
+
+def _append_opencode_model(models, provider_name, model_name, min_interval=2.0):
+    provider = _load_opencode_provider(provider_name)
+    if not provider:
+        return
+    opts = provider.get("options", {}) or {}
+    configured_models = provider.get("models", {}) or {}
+    base_url = opts.get("baseURL", "") or opts.get("baseUrl", "") or opts.get("base_url", "")
+    api_key = opts.get("apiKey", "") or opts.get("api_key", "")
+    if model_name in configured_models and base_url:
+        model_conf = configured_models.get(model_name) or {}
+        actual_model = model_conf.get("id") or model_name
+        models.append(ApiModel(provider_name, actual_model, base_url, api_key,
+                               min_interval=min_interval, tool_capable=True,
+                               display_model=model_name))
+
+
 def _build_api_models():
     models = []
 
     # Priority is intentional, not random. Keep low-context models such as
     # GLM-4V-Flash (16K) out of this pool because experiments target 40K.
-    sense_provider = _load_opencode_provider("sense-nova")
-    if sense_provider:
-        opts = sense_provider.get("options", {})
-        configured_models = sense_provider.get("models", {})
-        if "sensenova-6.7-flash-lite" in configured_models:
-            models.append(ApiModel("sense-nova", "sensenova-6.7-flash-lite",
-                                   opts.get("baseURL", ""), opts.get("apiKey", ""),
-                                   min_interval=1.5, tool_capable=True))
+    _append_sensenova_models(models)
 
     longcat_provider = _load_opencode_provider("longcat")
     if longcat_provider:
@@ -212,6 +354,15 @@ def _build_api_models():
             ApiModel("zhipu", "GLM-4.6V-Flash", base, zhipu_key, min_interval=3.0, tool_capable=True),
         ])
 
+    # Extra free DeepSeek-v4-flash endpoints from opencode/forwarded LAN providers.
+    # They are added after the original pool so the default order stays stable.
+    # Use --api-priority to move them to the front for dedicated multi-volume runs.
+    _append_opencode_model(models, "atomcode-proxy", "deepseek-v4-flash", min_interval=2.0)
+    _append_opencode_model(models, "lan-237", "deepseek-v4-flash-free-237", min_interval=2.0)
+    _append_opencode_model(models, "lan-162", "deepseek-v4-flash-free-162", min_interval=2.0)
+    _append_opencode_model(models, "lan-171", "deepseek-v4-flash-free-171", min_interval=2.0)
+    _append_opencode_model(models, "lan-189", "deepseek-v4-flash-free-189", min_interval=2.0)
+
     if API_MODEL_FILTER:
         lowered = API_MODEL_FILTER.lower()
         exact_models = [
@@ -225,6 +376,7 @@ def _build_api_models():
                 model for model in models
                 if lowered in model.label.lower() or lowered in model.model.lower() or lowered in model.name.lower()
             ]
+    models = _apply_api_priority(models)
     return models
 
 
@@ -280,7 +432,9 @@ def _api_chat(model, messages, tools=None, tool_choice="auto"):
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = tool_choice
-    resp = requests.post(model.chat_url, headers=headers, json=payload, timeout=300)
+    with requests.Session() as session:
+        session.trust_env = model.use_env_proxy
+        resp = session.post(model.chat_url, headers=headers, json=payload, timeout=300)
     model.last_call_at = time.time()
     if resp.status_code == 429:
         model.mark_failure("rate limited", cooldown=120)
@@ -333,15 +487,25 @@ def _health_check_model(model, needs_tools):
     return True
 
 
-def init_api_fallback():
+def init_api_fallback(health_check="all"):
     global API_MODELS
     API_MODELS = _build_api_models()
     if not API_MODELS:
         raise ModelCallError("No API fallback models configured. Set ZHIPUAI_API_KEY or configure opencode providers.")
 
+    if health_check == "none":
+        print("  API fallback health check: skipped")
+        print("  API fallback order:")
+        for model in API_MODELS:
+            print(f"    PEND {model.label} (lazy check on first use)")
+        return
+
     print("  API fallback health check:")
     usable = []
-    for model in API_MODELS:
+    models_to_check = API_MODELS[:1] if health_check == "first" else API_MODELS
+    checked = set()
+    for model in models_to_check:
+        checked.add(model.label)
         needs_tools = model.tool_capable
         try:
             _health_check_model(model, needs_tools=needs_tools)
@@ -353,7 +517,11 @@ def init_api_fallback():
         except Exception as exc:
             model.mark_failure(str(exc), cooldown=300)
             print(f"    FAIL {model.label} ({str(exc)[:100]})")
-    if not usable:
+    if health_check == "first":
+        for model in API_MODELS:
+            if model.label not in checked:
+                print(f"    PEND {model.label} (lazy fallback)")
+    if not usable and health_check == "all":
         raise ModelCallError("All tool-capable API fallback models failed health checks.")
 
 
@@ -402,6 +570,104 @@ def _coerce_text_tool_call(text, tools):
     return []
 
 
+def _extract_int_arg(text, name, default=None):
+    match = re.search(rf'["\']?{re.escape(name)}["\']?\s*[:=]\s*["\']?(-?\d+)', text)
+    if match:
+        return int(match.group(1))
+    return default
+
+
+def _extract_str_arg(text, name, default=""):
+    quoted = re.search(rf'["\']?{re.escape(name)}["\']?\s*[:=]\s*["\']([^"\']+)["\']', text)
+    if quoted:
+        return quoted.group(1)
+    bare = re.search(rf'["\']?{re.escape(name)}["\']?\s*[:=]\s*([^,}}\]\s]+)', text)
+    if bare:
+        return bare.group(1).strip()
+    return default
+
+
+def _repair_missing_commas(text):
+    value = r'(?:"[^"]*"|\'[^\']*\'|-?\d+(?:\.\d+)?|true|false|null)'
+    key_ahead = r'(?=["\']?[A-Za-z_][\w-]*["\']?\s*:)'
+    return re.sub(rf'({value})\s+{key_ahead}', r'\1, ', text)
+
+
+def parse_tool_arguments(function_name, raw_args):
+    """Parse tool arguments defensively; model tool JSON is sometimes malformed."""
+    if isinstance(raw_args, dict):
+        return raw_args, ""
+    if raw_args is None:
+        return {}, "missing tool arguments"
+    if not isinstance(raw_args, str):
+        return {}, f"unsupported argument type: {type(raw_args).__name__}"
+
+    text = raw_args.strip()
+    if not text:
+        return {}, "empty tool arguments"
+
+    attempts = [text, _repair_missing_commas(text)]
+    for candidate in attempts:
+        try:
+            parsed = json.loads(candidate)
+            if isinstance(parsed, dict):
+                return parsed, "" if candidate == text else "repaired malformed JSON arguments"
+        except json.JSONDecodeError:
+            pass
+
+    try:
+        parsed = ast.literal_eval(text)
+        if isinstance(parsed, dict):
+            return parsed, "parsed Python-style tool arguments"
+    except (ValueError, SyntaxError):
+        pass
+
+    if function_name == "read_novel_lines":
+        start = _extract_int_arg(text, "start")
+        count = _extract_int_arg(text, "count")
+        if start is None or count is None:
+            nums = [int(n) for n in re.findall(r"-?\d+", text)]
+            if start is None and nums:
+                start = nums[0]
+            if count is None and len(nums) >= 2:
+                count = nums[1]
+        if start is not None:
+            args = {"start": max(1, int(start)), "count": max(1, min(int(count or 10), 200))}
+            return args, "recovered read_novel_lines arguments from malformed JSON"
+
+    if function_name == "search_novel":
+        keyword = _extract_str_arg(text, "keyword")
+        context_lines = _extract_int_arg(text, "context_lines", 2)
+        if keyword:
+            return {"keyword": keyword, "context_lines": max(0, min(int(context_lines or 2), 5))}, \
+                "recovered search_novel arguments from malformed JSON"
+
+    return {}, f"failed to parse tool arguments: {text[:120]}"
+
+
+def normalize_tool_call(tc, func_args):
+    normalized = dict(tc)
+    func = dict(normalized.get("function", {}) or {})
+    func["arguments"] = json.dumps(func_args or {}, ensure_ascii=False)
+    normalized["function"] = func
+    return normalized
+
+
+def compact_text(text, max_chars, keep="tail"):
+    text = text or ""
+    if len(text) <= max_chars:
+        return text
+    marker = f"\n...(truncated {len(text) - max_chars} chars)...\n"
+    keep_chars = max(0, max_chars - len(marker))
+    if keep == "head":
+        return text[:keep_chars] + marker
+    if keep == "middle":
+        left = keep_chars // 2
+        right = keep_chars - left
+        return text[:left] + marker + text[-right:]
+    return marker + text[-keep_chars:]
+
+
 def call_api_fallback(messages, tools=None, label=""):
     global API_CALL_TRACE
     needs_tools = bool(tools)
@@ -414,14 +680,50 @@ def call_api_fallback(messages, tools=None, label=""):
             tool_choice = "auto"
             if expects_tool and model.name != "agnes":
                 tool_choice = {"type": "function", "function": {"name": "read_novel_lines"}}
+            temp_log_event(
+                "model_call_start",
+                label=label,
+                provider=model.name,
+                model=model.model,
+                model_label=model.label,
+                tools_enabled=bool(tools),
+                expects_tool=expects_tool,
+                tool_choice=tool_choice,
+                api_context_limit=API_CONTEXT_LIMIT,
+                **_message_trace_summary(messages),
+            )
             text, pec, ec, tool_calls = _api_chat(model, messages, tools=tools, tool_choice=tool_choice)
             coerced_tool_call = False
             if not tool_calls:
                 tool_calls = _coerce_text_tool_call(text, tools)
                 coerced_tool_call = bool(tool_calls)
             if expects_tool and not tool_calls:
+                temp_log_event(
+                    "model_call_rejected",
+                    label=label,
+                    provider=model.name,
+                    model=model.model,
+                    model_label=model.label,
+                    reason="expected tool call but model returned none",
+                    response_len=len(text or ""),
+                    response_head=(text or "")[:500],
+                )
                 errors.append(f"{model.label}: no tool call")
                 continue
+            temp_log_event(
+                "model_call_success",
+                label=label,
+                provider=model.name,
+                model=model.model,
+                model_label=model.label,
+                tools_enabled=bool(tools),
+                tool_calls=len(tool_calls),
+                coerced_text_tool_call=coerced_tool_call,
+                prompt_eval_count=pec,
+                eval_count=ec,
+                response_len=len(text or ""),
+                response_head=(text or "")[:500],
+            )
             API_CALL_TRACE.append({
                 "label": label,
                 "provider": model.name,
@@ -436,9 +738,27 @@ def call_api_fallback(messages, tools=None, label=""):
             })
             return text, pec, ec, tool_calls
         except Exception as exc:
+            temp_log_event(
+                "model_call_error",
+                label=label,
+                provider=model.name,
+                model=model.model,
+                model_label=model.label,
+                tools_enabled=bool(tools),
+                error_type=type(exc).__name__,
+                error=str(exc)[:1000],
+                **_message_trace_summary(messages),
+            )
             errors.append(str(exc)[:160])
             continue
     detail = "; ".join(errors[-5:]) if errors else "no model available outside cooldown"
+    temp_log_event(
+        "model_call_failed_all",
+        label=label,
+        tools_enabled=bool(tools),
+        errors=errors[-10:],
+        detail=detail,
+    )
     raise ModelCallError(f"All API fallback models failed for {label or 'request'}: {detail}")
 
 # Temporary descriptors that need forward name search
@@ -490,17 +810,107 @@ def search_forward_for_name(line_num, descriptor):
 # Logging
 # ============================================================
 
+def _preview_text(text, limit=500):
+    text = text or ""
+    if len(text) <= limit * 2:
+        return {"len": len(text), "head": text, "tail": ""}
+    return {"len": len(text), "head": text[:limit], "tail": text[-limit:]}
+
+
+def _message_trace_summary(messages):
+    message_items = []
+    for idx, msg in enumerate(messages or []):
+        content = msg.get("content") or ""
+        tool_calls = msg.get("tool_calls") or []
+        tool_calls_len = sum(len(json.dumps(tc, ensure_ascii=False, default=str)) for tc in tool_calls)
+        preview = _preview_text(content, 240)
+        message_items.append({
+            "idx": idx,
+            "role": msg.get("role", ""),
+            "content_len": len(content),
+            "tool_calls_len": tool_calls_len,
+            "total_len": len(content) + tool_calls_len,
+            "content_head": preview["head"],
+            "content_tail": preview["tail"],
+        })
+    estimated = _estimate_message_tokens(messages or [])
+    return {
+        "message_count": len(messages or []),
+        "estimated_context": estimated,
+        "estimated_with_output": estimated + API_MAX_OUTPUT_TOKENS,
+        "messages": message_items,
+    }
+
+
+def _trace_context(round_log=None):
+    source = round_log or CURRENT_ROUND_TRACE or {}
+    if not source:
+        return {}
+    return {
+        "trace_id": source.get("trace_id"),
+        "round": source.get("round"),
+        "dialogue_line": source.get("dialogue_line"),
+        "dialogue_text": source.get("dialogue_text"),
+    }
+
+
+def temp_log_event(event, round_log=None, **fields):
+    """Append best-effort per-round trace data before the formal log is committed."""
+    if not TEMP_LOG_PATH:
+        return
+    entry = {
+        "timestamp": datetime.now().isoformat(),
+        "event": event,
+    }
+    entry.update({k: v for k, v in _trace_context(round_log).items() if v is not None})
+    entry.update(fields)
+    try:
+        with open(TEMP_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
+            f.flush()
+    except Exception:
+        # Temp tracing must never break annotation.
+        pass
+
+
+def set_current_round_trace(round_log):
+    global CURRENT_ROUND_TRACE
+    CURRENT_ROUND_TRACE = round_log
+
+
+def clear_current_round_trace():
+    global CURRENT_ROUND_TRACE
+    CURRENT_ROUND_TRACE = None
+
+
+def trace_tool_result(agent_name, tool_round, function_name, args, result, note=""):
+    preview = _preview_text(result, 500)
+    temp_log_event(
+        "tool_result",
+        agent=agent_name,
+        tool_round=tool_round,
+        function=function_name,
+        args=args,
+        result_len=preview["len"],
+        result_head=preview["head"],
+        result_tail=preview["tail"],
+        note=note,
+    )
+
+
 def log_entry(entry):
     with open(LOG_PATH, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
 def new_round(round_idx, line_num, dialogue):
+    timestamp = datetime.now().isoformat()
     return {
+        "trace_id": f"{os.getpid()}-{timestamp}-L{line_num}",
         "round": round_idx,
         "dialogue_line": line_num,
         "dialogue_text": dialogue,
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": timestamp,
         "agents": {},
         "tool_calls": [],
         "result": None,
@@ -525,6 +935,7 @@ def log_agent(round_log, agent_name, role, input_messages, response_text, pec, e
         entry["model_calls"] = API_CALL_TRACE
         API_CALL_TRACE = []
     round_log["agents"][agent_name] = entry
+    temp_log_event("agent_complete", round_log, agent=agent_name, role=role, entry=entry)
 
 
 # ============================================================
@@ -731,13 +1142,49 @@ def call_ollama(messages, tools=None, label=""):
     }
     if tools:
         payload["tools"] = tools
-    resp = requests.post(url, json=payload, timeout=300)
-    data = resp.json()
-    pec = data.get("prompt_eval_count", 0)
-    ec = data.get("eval_count", 0)
-    text = data.get("message", {}).get("content", "")
-    tool_calls = data.get("message", {}).get("tool_calls", [])
-    return text, pec, ec, tool_calls
+    temp_log_event(
+        "model_call_start",
+        label=label,
+        provider="ollama",
+        model=OLLAMA_MODEL,
+        model_label=OLLAMA_MODEL,
+        tools_enabled=bool(tools),
+        **_message_trace_summary(messages),
+    )
+    try:
+        resp = requests.post(url, json=payload, timeout=300)
+        data = resp.json()
+        pec = data.get("prompt_eval_count", 0)
+        ec = data.get("eval_count", 0)
+        text = data.get("message", {}).get("content", "")
+        tool_calls = data.get("message", {}).get("tool_calls", [])
+        temp_log_event(
+            "model_call_success",
+            label=label,
+            provider="ollama",
+            model=OLLAMA_MODEL,
+            model_label=OLLAMA_MODEL,
+            tools_enabled=bool(tools),
+            tool_calls=len(tool_calls),
+            prompt_eval_count=pec,
+            eval_count=ec,
+            response_len=len(text or ""),
+            response_head=(text or "")[:500],
+        )
+        return text, pec, ec, tool_calls
+    except Exception as exc:
+        temp_log_event(
+            "model_call_error",
+            label=label,
+            provider="ollama",
+            model=OLLAMA_MODEL,
+            model_label=OLLAMA_MODEL,
+            tools_enabled=bool(tools),
+            error_type=type(exc).__name__,
+            error=str(exc)[:1000],
+            **_message_trace_summary(messages),
+        )
+        raise
 
 
 # ============================================================
@@ -779,6 +1226,22 @@ TOOL_SEARCH_NOVEL = {
 LABELER_TOOLS = [TOOL_READ_NOVEL, TOOL_SEARCH_NOVEL]
 
 
+NON_PERSON_LABEL = "非人物发声"
+NON_PERSON_ALIASES = {
+    "narr",
+    "narrator",
+    "non-human",
+    "non-person",
+    "nonperson",
+    "not-spoken",
+    "not_spoken",
+    "sound-effect",
+    "sound_effect",
+    "ambient-sound",
+    "ambient_sound",
+}
+
+
 # ============================================================
 # Character State - clean, validated, no pollution
 # ============================================================
@@ -794,8 +1257,15 @@ def validate_char_name(name):
     name = name.strip()
     if not name:
         return None
+    alias_key = name.strip().lower()
+    if alias_key in NON_PERSON_ALIASES:
+        return NON_PERSON_LABEL
     # Reject if contains description patterns (model sometimes appends these)
-    bad_patterns = ["--", "—", "–", "\u2014", "\u2013", "根据", "原文", "禁止", "错误示例"]
+    bad_patterns = [
+        "--", "—", "–", "\u2014", "\u2013",
+        "根据", "原文", "禁止", "错误示例",
+        "Looking at", "context around", "speaker is", "the speaker",
+    ]
     for bp in bad_patterns:
         if bp in name:
             return None
@@ -1426,6 +1896,7 @@ If you think an auxiliary label is wrong, say so in <reason>.
         total_ec = 0
         tool_call_log = []
         cumulative_tokens = 0
+        answered = False
 
         for round_i in range(MAX_TOOL_ROUNDS):
             text, pec, ec, tool_calls = call_ollama(messages, tools=LABELER_TOOLS, label=f"Labeler-R{round_i+1}")
@@ -1450,17 +1921,29 @@ If you think an auxiliary label is wrong, say so in <reason>.
                 log_agent(round_log, "Labeler", "labeler", messages, text, pec, ec,
                           total_pec=total_pec, total_ec=total_ec,
                           tool_calls_list=tool_call_log if tool_call_log else None)
+                answered = True
                 break
 
             tc_details = []
+            parsed_tool_calls = []
             for tc in tool_calls:
                 func = tc.get("function", {})
                 raw_args = func.get("arguments", "{}")
-                func_args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
-                tc_details.append({
+                name = func.get("name", "")
+                func_args, parse_error = parse_tool_arguments(name, raw_args)
+                parsed_tool_calls.append({
+                    "tool_call": normalize_tool_call(tc, func_args),
+                    "function": name,
+                    "arguments": func_args,
+                    "parse_error": parse_error,
+                })
+                detail = {
                     "function": func.get("name"),
                     "arguments": func_args
-                })
+                }
+                if parse_error:
+                    detail["argument_parse_note"] = parse_error
+                tc_details.append(detail)
 
             tool_call_log.append({
                 "round": round_i + 1,
@@ -1470,29 +1953,57 @@ If you think an auxiliary label is wrong, say so in <reason>.
                 "eval_count": ec,
             })
 
-            messages.append({"role": "assistant", "content": text, "tool_calls": tool_calls})
+            messages.append({
+                "role": "assistant",
+                "content": text,
+                "tool_calls": [item["tool_call"] for item in parsed_tool_calls],
+            })
 
-            for tc in tool_calls:
-                func = tc.get("function", {})
-                raw_args = func.get("arguments", "{}")
-                func_args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
-                name = func.get("name", "")
+            for item in parsed_tool_calls:
+                name = item["function"]
+                func_args = item["arguments"]
+                parse_error = item["parse_error"]
+                if parse_error and not func_args:
+                    invalid_msg = f"Tool arguments invalid: {parse_error}. Call the tool again with valid JSON arguments."
+                    trace_tool_result("Labeler", round_i + 1, name, {}, invalid_msg, note="invalid tool arguments")
+                    messages.append({"role": "tool", "content": invalid_msg})
+                    continue
                 if name == "read_novel_lines":
-                    s = func_args.get("start", 1)
-                    c = func_args.get("count", 10)
+                    try:
+                        s = int(func_args.get("start", 1) or 1)
+                        c = int(func_args.get("count", 10) or 10)
+                    except (TypeError, ValueError):
+                        invalid_msg = "Tool arguments invalid: start and count must be integers. Call read_novel_lines again with valid JSON."
+                        trace_tool_result("Labeler", round_i + 1, name, func_args, invalid_msg, note="invalid read_novel_lines arguments")
+                        messages.append({"role": "tool", "content": invalid_msg})
+                        continue
                     result = read_novel_lines(s, c)
                     self.tool_call_count += 1
                     if not quiet:
                         print(f"    Tool call #{self.tool_call_count}: read_novel_lines({s}-{s+c-1}) -> {len(result)} chars, pec={pec}, ec={ec}")
+                    trace_tool_result("Labeler", round_i + 1, name, {"start": s, "count": c}, result)
                     messages.append({"role": "tool", "content": result})
                 elif name == "search_novel":
                     keyword = func_args.get("keyword", "")
-                    ctx = func_args.get("context_lines", 2)
+                    try:
+                        ctx = int(func_args.get("context_lines", 2) or 2)
+                    except (TypeError, ValueError):
+                        ctx = 2
+                    if not keyword:
+                        invalid_msg = "Tool arguments invalid: keyword is required. Call search_novel again with valid JSON."
+                        trace_tool_result("Labeler", round_i + 1, name, func_args, invalid_msg, note="missing search keyword")
+                        messages.append({"role": "tool", "content": invalid_msg})
+                        continue
                     result = search_novel(keyword, ctx)
                     self.tool_call_count += 1
                     if not quiet:
                         print(f"    Tool call #{self.tool_call_count}: search_novel('{keyword}') -> {len(result)} chars, pec={pec}, ec={ec}")
+                    trace_tool_result("Labeler", round_i + 1, name, {"keyword": keyword, "context_lines": ctx}, result)
                     messages.append({"role": "tool", "content": result})
+                else:
+                    invalid_msg = f"Unsupported tool '{name}'. Use read_novel_lines or search_novel."
+                    trace_tool_result("Labeler", round_i + 1, name, func_args, invalid_msg, note="unsupported tool")
+                    messages.append({"role": "tool", "content": invalid_msg})
 
             # Token budget check
             if cumulative_tokens >= TOKEN_BUDGET:
@@ -1505,6 +2016,21 @@ If you think an auxiliary label is wrong, say so in <reason>.
         else:
             if not quiet:
                 print(f"    Max tool rounds reached ({MAX_TOOL_ROUNDS})")
+
+        if not answered or not self._parse_answer(text):
+            messages.append({
+                "role": "user",
+                "content": (
+                    "Stop using tools. Based on the tool results already shown, output exactly one final "
+                    "answer with <answer>, <reason>, and <summary> tags."
+                ),
+            })
+            text, pec, ec, tool_calls = call_ollama(messages, tools=None, label="Labeler-Final")
+            total_pec += pec
+            total_ec += ec
+            log_agent(round_log, "Labeler", "labeler", messages, text, pec, ec,
+                      total_pec=total_pec, total_ec=total_ec,
+                      tool_calls_list=tool_call_log if tool_call_log else None)
 
         round_log["tool_calls"] = tool_call_log
 
@@ -1550,7 +2076,8 @@ If you think an auxiliary label is wrong, say so in <reason>.
             return raw  # Return as-is if we can't clean it
         # Fallback: first line of response
         fallback = text.strip().split("\n")[0][:50]
-        return fallback
+        cleaned = validate_char_name(fallback)
+        return cleaned
 
     def _parse_summary(self, text):
         match = re.search(r"<summary>(.*?)</summary>", text, re.DOTALL)
@@ -1607,18 +2134,32 @@ RULES:
 - Form your OWN conclusion about who is speaking
 - Then compare with the primary answer
 - First classify the quote type: direct_speech, quote_or_letter, password_or_signal, sound_effect, thought_not_spoken, or unclear
-- For quote_or_letter/password_or_signal/sound_effect/thought_not_spoken, be careful: the correct label may be non-person, a signal, or the source text rather than the nearby character
+- Use 非人物发声 for non-person labels. Never output narrator, narr, non-person, or non-human as a speaker name.
+- Embedded quotes are not automatically non-person. If the local text attributes the quote to a character
+  (for example: a character says it, wants to say it, is about to say it, or looks as if saying it),
+  keep that character as the speaker unless there is stronger contrary evidence.
+- For quote_or_letter/password_or_signal/sound_effect/thought_not_spoken, be careful: the correct label may be 非人物发声, a signal, or the attributed source rather than the nearby character
 - For rapid two-person exchanges, do not rely on alternation alone; cite the local narrative or adjacent dialogue structure
+- Be conservative. Disagree only when explicit local evidence contradicts the primary answer.
+- evidence_basis=explicit_attribution only when the local text directly attributes the target quote to a source
+  with a speech/thought verb such as says, asks, answers, continues, wants to say, or looks as if saying.
+- evidence_basis=speaker_action is weaker. Do not use it for a person's later movement or reaction unless it
+  directly frames the target quote.
 - If you agree, output <verdict>confirm</verdict>
 - If you disagree, output <verdict>disagree</verdict> and provide your suggested speaker
 
 OUTPUT:
 <quote_type>type</quote_type>
+<evidence_basis>explicit_attribution|speaker_action|quote_type|alternation|inference|unknown</evidence_basis>
+<confidence>high|medium|low</confidence>
 <verdict>confirm</verdict> or <verdict>disagree</verdict>
 <suggested_speaker>name</suggested_speaker>
 <reason>your evidence citing specific line numbers</reason>"""
 
         risk_text = "\n".join(f"- {r}" for r in (risk_reasons or [])) or "(none)"
+        compact_navigation = compact_text(navigation_text, 8000, keep="middle")
+        compact_short_mem = compact_text(short_mem_text, 4000, keep="tail")
+        compact_char_state = compact_text(char_state_text, 4000, keep="tail")
         user_content = f"""Verify the speaker of this dialogue:
 
 Line {line_num}: 「{dialogue}」
@@ -1630,14 +2171,14 @@ Risk reasons that triggered verification:
 
 ========================================
 Original text navigation:
-{navigation_text}
+{compact_navigation}
 
-{short_mem_text}
+{compact_short_mem}
 
 {scene_summary}
 
 [Character State]
-{char_state_text}
+{compact_char_state}
 
 ========================================
 Call read_novel_lines to verify. Form your own conclusion first, then compare.
@@ -1652,6 +2193,7 @@ Call read_novel_lines to verify. Form your own conclusion first, then compare.
         total_ec = 0
         tool_call_log = []
         text = ""
+        tool_results = []
 
         # Allow tool read + final verdict. Some APIs need a second model turn
         # after the tool result before they can produce the verdict.
@@ -1661,15 +2203,46 @@ Call read_novel_lines to verify. Form your own conclusion first, then compare.
             total_ec += ec
             if not tool_calls:
                 break
-            messages.append({"role": "assistant", "content": text, "tool_calls": tool_calls})
+            parsed_tool_calls = []
             for tc in tool_calls:
                 func = tc.get("function", {})
                 raw_args = func.get("arguments", "{}")
-                func_args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
-                if func.get("name") == "read_novel_lines":
-                    s = func_args.get("start", 1)
-                    c = func_args.get("count", 10)
+                name = func.get("name", "")
+                func_args, parse_error = parse_tool_arguments(name, raw_args)
+                parsed_tool_calls.append({
+                    "tool_call": normalize_tool_call(tc, func_args),
+                    "function": name,
+                    "arguments": func_args,
+                    "parse_error": parse_error,
+                })
+            messages.append({
+                "role": "assistant",
+                "content": text,
+                "tool_calls": [item["tool_call"] for item in parsed_tool_calls],
+            })
+            for item in parsed_tool_calls:
+                name = item["function"]
+                func_args = item["arguments"]
+                parse_error = item["parse_error"]
+                if parse_error and not func_args:
+                    invalid_msg = f"Tool arguments invalid: {parse_error}. Call read_novel_lines again with valid JSON arguments."
+                    trace_tool_result("Verifier", round_i + 1, name, {}, invalid_msg, note="invalid tool arguments")
+                    messages.append({"role": "tool", "content": invalid_msg})
+                    tool_results.append(invalid_msg)
+                    continue
+                if name == "read_novel_lines":
+                    try:
+                        s = int(func_args.get("start", 1) or 1)
+                        c = int(func_args.get("count", 10) or 10)
+                    except (TypeError, ValueError):
+                        invalid_msg = "Tool arguments invalid: start and count must be integers. Call read_novel_lines again with valid JSON."
+                        trace_tool_result("Verifier", round_i + 1, name, func_args, invalid_msg, note="invalid read_novel_lines arguments")
+                        messages.append({"role": "tool", "content": invalid_msg})
+                        tool_results.append(invalid_msg)
+                        continue
                     result = read_novel_lines(s, c)
+                    trace_tool_result("Verifier", round_i + 1, name, {"start": s, "count": c}, result)
+                    tool_results.append(f"[read_novel_lines start={s} count={c}]\n{result}")
                     self.tool_call_count += 1
                     tool_call_log.append({
                         "round": round_i + 1,
@@ -1679,7 +2252,42 @@ Call read_novel_lines to verify. Form your own conclusion first, then compare.
                         "eval_count": ec,
                     })
                     messages.append({"role": "tool", "content": result})
-            messages.append({"role": "user", "content": "Now output <quote_type>, <verdict>, <suggested_speaker>, and <reason> based on the tool result."})
+                else:
+                    invalid_msg = f"Unsupported tool '{name}'. Use read_novel_lines."
+                    trace_tool_result("Verifier", round_i + 1, name, func_args, invalid_msg, note="unsupported tool")
+                    messages.append({"role": "tool", "content": invalid_msg})
+                    tool_results.append(invalid_msg)
+
+            final_user_content = f"""Based on the compact context and the tool result below, verify the speaker.
+
+Line {line_num}: 「{dialogue}」
+Primary annotator's answer: {labeler_speaker}
+
+Risk reasons:
+{risk_text}
+
+[Compact local navigation]
+{compact_navigation}
+
+[Tool result]
+{compact_text(chr(10).join(tool_results), 12000, keep="tail")}
+
+Output exactly:
+<quote_type>type</quote_type>
+<evidence_basis>explicit_attribution|speaker_action|quote_type|alternation|inference|unknown</evidence_basis>
+<confidence>high|medium|low</confidence>
+<verdict>confirm</verdict> or <verdict>disagree</verdict>
+<suggested_speaker>name</suggested_speaker>
+<reason>evidence citing line numbers</reason>"""
+            final_messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": final_user_content},
+            ]
+            text, pec, ec, _ = call_ollama(final_messages, tools=None, label="Verifier-Final")
+            total_pec += pec
+            total_ec += ec
+            messages = final_messages
+            break
 
         log_agent(round_log, "Verifier", "verifier", messages, text, pec if 'pec' in locals() else 0,
                   ec if 'ec' in locals() else 0, tool_calls_list=tool_call_log if tool_call_log else None,
@@ -1689,6 +2297,8 @@ Call read_novel_lines to verify. Form your own conclusion first, then compare.
         verdict = "confirm"
         suggested = labeler_speaker
         reason = ""
+        basis = "unknown"
+        confidence = "low"
         if "<verdict>disagree</verdict>" in text:
             verdict = "disagree"
             m = re.search(r"<suggested_speaker>(.*?)</suggested_speaker>", text, re.DOTALL)
@@ -1697,6 +2307,12 @@ Call read_novel_lines to verify. Form your own conclusion first, then compare.
                 cleaned = validate_char_name(raw)
                 if cleaned:
                     suggested = cleaned
+        m = re.search(r"<evidence_basis>(.*?)</evidence_basis>", text, re.DOTALL)
+        if m:
+            basis = m.group(1).strip().lower()
+        m = re.search(r"<confidence>(.*?)</confidence>", text, re.DOTALL)
+        if m:
+            confidence = m.group(1).strip().lower()
         m = re.search(r"<reason>(.*?)</reason>", text, re.DOTALL)
         if m:
             reason = m.group(1).strip()[:200]
@@ -1707,7 +2323,7 @@ Call read_novel_lines to verify. Form your own conclusion first, then compare.
             else:
                 self._safe_print(f"  Verifier confirms: {labeler_speaker}")
 
-        return verdict, suggested, reason
+        return verdict, suggested, reason, basis, confidence
 
 
 # ============================================================
@@ -1784,19 +2400,64 @@ class Boss:
         """Return generic risk reasons that should trigger independent review."""
         reasons = []
         normalized = (speaker or "").strip()
+        short_fragment = self._is_short_or_fragment(dialogue)
+        phase_conflict = bool(next_expected and normalized and normalized != next_expected)
 
         if normalized in TEMP_DESCRIPTORS:
             reasons.append("speaker is a temporary descriptor and may need identity verification")
-        if normalized in ("非人物发声", "non-human"):
+        if validate_char_name(normalized) == NON_PERSON_LABEL:
             reasons.append("speaker is non-person; quote type should be verified")
-        if next_expected and normalized and normalized != next_expected:
+        if phase_conflict and (short_fragment or tool_rounds_used <= 1):
             reasons.append("speaker conflicts with recent two-person exchange expectation")
-        if self.short_mem.detect_rapid_exchange(4) and self._is_short_or_fragment(dialogue):
+        if self.short_mem.detect_rapid_exchange(4) and short_fragment:
             reasons.append("short or fragmentary line inside a rapid exchange")
-        if tool_rounds_used <= 1 and self._is_short_or_fragment(dialogue):
+        if reasons and tool_rounds_used <= 1 and short_fragment:
             reasons.append("low evidence depth for a short or fragmentary line")
 
         return reasons
+
+    def _is_concrete_speaker(self, speaker):
+        cleaned = validate_char_name(speaker)
+        return bool(cleaned and cleaned not in (NON_PERSON_LABEL, "?") and cleaned not in TEMP_DESCRIPTORS)
+
+    def _should_apply_verifier_change(self, current_speaker, suggested, verifier_reason,
+                                      evidence_basis="unknown", confidence="low"):
+        """Conservatively decide whether Verifier may override the primary label."""
+        current = validate_char_name(current_speaker) or current_speaker
+        proposed = validate_char_name(suggested)
+        if not proposed or proposed == current:
+            return False
+
+        current_is_concrete = self._is_concrete_speaker(current)
+        if proposed == NON_PERSON_LABEL and current_is_concrete:
+            return False
+
+        basis = (evidence_basis or "unknown").strip().lower()
+        conf = (confidence or "low").strip().lower()
+        strong_bases = {"explicit_attribution", "quote_type"}
+        if basis not in strong_bases or conf not in {"high", "certain"}:
+            return False
+
+        reason = (verifier_reason or "").lower()
+        weak_phrases = (
+            "alternating", "dialogue structure", "dialogue flow", "natural response",
+            "交替", "对话结构", "对话逻辑", "自然回应",
+        )
+        strong_phrases = (
+            "explicit", "directly attributes", "speech verb", "states", "says",
+            "明确", "直接", "说：", "说道", "问道", "回答", "开口", "喊道", "叫道",
+        )
+        if any(p in reason for p in weak_phrases) and not any(p in reason for p in strong_phrases):
+            return False
+
+        narrative_non_person_phrases = (
+            "not direct speech", "narrative text", "narrative description",
+            "不是直接发言", "叙述文字", "叙述内容",
+        )
+        if current_is_concrete and any(p in reason for p in narrative_non_person_phrases):
+            return False
+
+        return True
 
     def process_one(self, line_num, dialogue, round_log, quiet=False):
         self.round_count += 1
@@ -1829,6 +2490,14 @@ class Boss:
             "evidence": evidence_text,
             "navigation": navigation_text,
         }
+        temp_log_event(
+            "round_context_ready",
+            round_log,
+            navigation_len=len(navigation_text or ""),
+            short_mem_len=len(short_mem_text or ""),
+            evidence_len=len(evidence_text or ""),
+            context_index_len=len(context_text or ""),
+        )
 
         # 5. Call Labeler (READ-ONLY, no state writing)
         speaker, summary, reason_text, pec, ec, tool_rounds_used = self.labeler.label(
@@ -1904,25 +2573,42 @@ class Boss:
         if risk_reasons:
             if not quiet:
                 self._safe_print(f"  Risk review: {', '.join(risk_reasons)}")
-            verdict, suggested, verifier_reason = self.verifier.verify(
-                line_num, dialogue, navigation_text, short_mem_text,
-                "", evidence_text, speaker, round_log, quiet=quiet,
-                risk_reasons=risk_reasons
-            )
+            temp_log_event("risk_review_start", round_log, speaker=speaker, reasons=risk_reasons)
+            try:
+                verdict, suggested, verifier_reason, evidence_basis, confidence = self.verifier.verify(
+                    line_num, dialogue, navigation_text, short_mem_text,
+                    "", evidence_text, speaker, round_log, quiet=quiet,
+                    risk_reasons=risk_reasons
+                )
+            except Exception as exc:
+                verdict = "skipped"
+                suggested = speaker
+                evidence_basis = "unknown"
+                confidence = "low"
+                verifier_reason = f"RiskVerifier skipped: {str(exc)[:200]}"
+                if not quiet:
+                    self._safe_print(f"  RiskVerifier skipped: {str(exc)[:200]}")
             round_log["risk_review"] = {
                 "reasons": risk_reasons,
                 "verdict": verdict,
                 "suggested": suggested,
                 "reason": verifier_reason,
+                "evidence_basis": evidence_basis,
+                "confidence": confidence,
             }
-            if verdict == "disagree" and suggested and suggested != speaker:
+            temp_log_event("risk_review_complete", round_log, review=round_log["risk_review"])
+            if verdict == "disagree" and self._should_apply_verifier_change(
+                speaker, suggested, verifier_reason, evidence_basis, confidence
+            ):
                 old_speaker = speaker
-                speaker = suggested
+                speaker = validate_char_name(suggested) or suggested
                 corrected = True
                 self.corrections += 1
                 reason_text = f"{reason_text} | RiskVerifier corrected {old_speaker} -> {speaker}: {verifier_reason}".strip()
                 if not quiet:
                     self._safe_print(f"  RiskVerifier corrected: {old_speaker} -> {speaker}")
+            elif verdict == "disagree" and not quiet:
+                self._safe_print(f"  RiskVerifier change rejected: {speaker} <-/-> {suggested}")
 
         # 9. Write to labeled.txt
         write_label(speaker)
@@ -1962,11 +2648,18 @@ def validate():
 
     answers = []
     answer_line_nums = []
+    answer_marker_nums = []
+    multi_marker_lines = []
     for i, line in enumerate(answer_lines):
-        match = re.search(r"【([^】]+)】", line)
-        if match:
-            answers.append(match.group(1))
+        matches = list(re.finditer(r"【([^】]+)】", line))
+        if len(matches) > 1:
+            multi_marker_lines.append((i + 1, len(matches)))
+        for marker_idx, match in enumerate(matches, start=1):
+            answers.append(match.group(1).strip())
             answer_line_nums.append(i + 1)
+            answer_marker_nums.append(marker_idx)
+
+    dialogue_count = len(get_dialogue_list()) if os.path.exists(NOVEL_PATH) else None
 
     total = min(len(labeled), len(answers))
     correct = 0
@@ -1975,14 +2668,15 @@ def validate():
     for i in range(total):
         label = labeled[i]
         answer = answers[i]
-        acceptable = answer.split("|")
-        label_parts = label.split("|")
-        if any(part in acceptable for part in label_parts):
+        acceptable = {part.strip() for part in answer.split("|") if part.strip()}
+        label_parts = {part.strip() for part in label.split("|") if part.strip()}
+        if acceptable & label_parts:
             correct += 1
         else:
             wrong.append({
                 "idx": i + 1,
                 "answer_line": answer_line_nums[i] if i < len(answer_line_nums) else "?",
+                "answer_marker": answer_marker_nums[i] if i < len(answer_marker_nums) else "?",
                 "expected": answer,
                 "got": label,
             })
@@ -1992,15 +2686,30 @@ def validate():
     print(f"\n{'='*60}")
     print(f"  Validation Report")
     print(f"{'='*60}")
-    print(f"  Total dialogues: {total}")
+    if dialogue_count is not None:
+        print(f"  Novel dialogues: {dialogue_count}")
+    print(f"  Labeled lines:    {len(labeled)}")
+    print(f"  Answer markers:   {len(answers)}")
+    print(f"  Total compared:   {total}")
     print(f"  Correct:         {correct}")
     print(f"  Wrong:           {len(wrong)}")
     print(f"  Accuracy:        {accuracy:.1f}%")
+    if multi_marker_lines:
+        examples = ", ".join(
+            f"L{line_no}({count})" for line_no, count in multi_marker_lines[:8]
+        )
+        extra = "" if len(multi_marker_lines) <= 8 else f", +{len(multi_marker_lines) - 8} more"
+        print(f"  Multi-marker answer lines parsed: {len(multi_marker_lines)} [{examples}{extra}]")
+    if dialogue_count is not None and len(answers) != dialogue_count:
+        print(f"  WARNING: answer marker count ({len(answers)}) != novel dialogue count ({dialogue_count})")
+    if len(labeled) != len(answers):
+        print(f"  WARNING: labeled line count ({len(labeled)}) != answer marker count ({len(answers)})")
 
     if wrong:
         print(f"\n  Error details (first 30):")
         for w in wrong[:30]:
-            print(f"    #{w['idx']} (novel L{w['answer_line']}): expected={w['expected']} | got={w['got']}")
+            marker_suffix = "" if w["answer_marker"] == 1 else f" marker#{w['answer_marker']}"
+            print(f"    #{w['idx']} (answer L{w['answer_line']}{marker_suffix}): expected={w['expected']} | got={w['got']}")
 
     return total, correct, len(wrong)
 
@@ -2015,23 +2724,56 @@ def _writeline(msg):
 
 
 def main():
-    global API_MODEL_FILTER, MODEL_PROVIDER
+    global API_MODEL_FILTER, API_MODEL_PRIORITY, MODEL_PROVIDER
     parser = argparse.ArgumentParser(description="Multi-agent novel dialogue speaker annotation v4")
     parser.add_argument("--start", type=int, default=0, help="Start from dialogue index (0=resume)")
     parser.add_argument("--count", type=int, default=1, help="Number of dialogues to annotate")
     parser.add_argument("--short-mem", type=int, default=20, help="Short-term memory rounds")
     parser.add_argument("--validate", action="store_true", help="Run validation after annotation")
     parser.add_argument("--reset-state", action="store_true", help="Reset character state before starting")
+    parser.add_argument("--data-dir", default=os.environ.get("NOVEL_DATA_DIR", ""),
+                        help="Per-volume data directory containing novel.txt/answers.txt and output state")
+    parser.add_argument("--novel", default=os.environ.get("NOVEL_PATH", ""),
+                        help="Override novel text path for this run")
+    parser.add_argument("--answers", default=os.environ.get("NOVEL_ANSWERS_PATH", ""),
+                        help="Override answer file path for validation")
+    parser.add_argument("--labeled", default=os.environ.get("NOVEL_LABELED_PATH", ""),
+                        help="Override labeled output path")
+    parser.add_argument("--log", default=os.environ.get("NOVEL_LOG_PATH", ""),
+                        help="Override JSONL log output path")
+    parser.add_argument("--state", default=os.environ.get("NOVEL_STATE_PATH", ""),
+                        help="Override character_state output path")
+    parser.add_argument("--vault", default=os.environ.get("NOVEL_VAULT_PATH", ""),
+                        help="Override evidence_vault output path")
     parser.add_argument("--provider", choices=["ollama", "api-fallback"], default=os.environ.get("NOVEL_MODEL_PROVIDER", "ollama"),
                         help="Model provider: ollama or api-fallback")
     parser.add_argument("--api-model", default=os.environ.get("NOVEL_API_MODEL", ""),
                         help="When using api-fallback, restrict calls to one provider/model substring")
+    parser.add_argument("--api-priority", default=os.environ.get("NOVEL_API_PRIORITY", ""),
+                        help="Comma-separated provider/model names to move to the front of api-fallback order")
+    parser.add_argument("--health-check", choices=["all", "first", "none"],
+                        default=os.environ.get("NOVEL_API_HEALTH_CHECK", "all"),
+                        help="API startup health checks: all models, first priority model only, or none")
     args = parser.parse_args()
+    configure_paths(
+        data_dir=args.data_dir,
+        novel_path=args.novel,
+        answers_path=args.answers,
+        labeled_path=args.labeled,
+        log_path=args.log,
+        state_path=args.state,
+        vault_path=args.vault,
+    )
     MODEL_PROVIDER = args.provider
     API_MODEL_FILTER = args.api_model.strip()
+    API_MODEL_PRIORITY = [item.strip() for item in args.api_priority.split(",") if item.strip()]
 
     print("=" * 60)
     print("  Multi-agent Novel Dialogue Speaker Annotation v4")
+    print(f"  Data dir: {DATA_DIR}")
+    print(f"  Novel: {NOVEL_PATH}")
+    print(f"  Answers: {ANSWERS_PATH}")
+    print(f"  Labeled: {LABELED_PATH}")
     print(f"  Provider: {MODEL_PROVIDER}")
     if MODEL_PROVIDER == "ollama":
         print(f"  Model: {OLLAMA_MODEL}")
@@ -2041,12 +2783,15 @@ def main():
         print(f"  API max output tokens: {API_MAX_OUTPUT_TOKENS}")
         if API_MODEL_FILTER:
             print(f"  API model filter: {API_MODEL_FILTER}")
+        if API_MODEL_PRIORITY:
+            print(f"  API model priority: {', '.join(API_MODEL_PRIORITY)}")
+        print(f"  API health check: {args.health_check}")
     print(f"  Short-term memory: {args.short_mem} rounds")
     print(f"  Token budget: {TOKEN_BUDGET}")
     print(f"  Max tool rounds: {MAX_TOOL_ROUNDS}")
 
     if MODEL_PROVIDER == "api-fallback":
-        init_api_fallback()
+        init_api_fallback(health_check=args.health_check)
 
     # Roster check
     try:
@@ -2070,10 +2815,17 @@ def main():
 
     print("=" * 60)
 
+    if not os.path.exists(NOVEL_PATH):
+        print(f"ERROR: novel file not found: {NOVEL_PATH}")
+        sys.exit(2)
+    if args.validate and not os.path.exists(ANSWERS_PATH):
+        print(f"ERROR: answers file not found: {ANSWERS_PATH}")
+        sys.exit(2)
+
     # Reset state if requested
     if args.reset_state:
         print("  Resetting all state...")
-        for p in [STATE_PATH, LOG_PATH, LABELED_PATH, VAULT_PATH]:
+        for p in [STATE_PATH, LOG_PATH, TEMP_LOG_PATH, LABELED_PATH, VAULT_PATH]:
             if os.path.exists(p):
                 os.remove(p)
         print("  State cleared. Starting fresh.")
@@ -2085,6 +2837,12 @@ def main():
     print(f"\n  Total dialogues in novel: {len(dialogues)}")
     print(f"  Already labeled: {labeled_count}")
     print(f"  Remaining: {len(dialogues) - labeled_count}")
+
+    if args.count <= 0:
+        print("  Count is 0; configuration check only, no annotation requested.")
+        if args.validate:
+            validate()
+        return
 
     start_idx = args.start if args.start > 0 else labeled_count
     end_idx = min(start_idx + args.count, len(dialogues))
@@ -2115,8 +2873,43 @@ def main():
     for idx in range(start_idx, end_idx):
         line_num, dialogue = dialogues[idx]
         round_log = new_round(idx - start_idx + 1, line_num, dialogue)
-        speaker = boss.process_one(line_num, dialogue, round_log, quiet=quiet_mode)
-        log_entry(round_log)
+        set_current_round_trace(round_log)
+        temp_log_event(
+            "round_start",
+            round_log,
+            absolute_index=idx + 1,
+            run_start_index=start_idx + 1,
+            run_end_index=end_idx,
+            formal_log_path=LOG_PATH,
+            temp_log_path=TEMP_LOG_PATH,
+            labeled_path=LABELED_PATH,
+        )
+        try:
+            speaker = boss.process_one(line_num, dialogue, round_log, quiet=quiet_mode)
+            log_entry(round_log)
+            temp_log_event(
+                "round_complete",
+                round_log,
+                speaker=speaker,
+                formal_log_written=True,
+                formal_log_path=LOG_PATH,
+            )
+        except Exception as exc:
+            round_log["error"] = {
+                "type": type(exc).__name__,
+                "message": str(exc),
+                "traceback": traceback.format_exc(),
+            }
+            temp_log_event(
+                "round_failed",
+                round_log,
+                error=round_log["error"],
+                formal_log_written=False,
+                formal_log_path=LOG_PATH,
+            )
+            raise
+        finally:
+            clear_current_round_trace()
 
         batch_tool_calls += len(round_log.get("tool_calls", []))
         labeler = round_log.get("agents", {}).get("Labeler", {})
@@ -2150,6 +2943,7 @@ def main():
     _writeline(f"  Corrections: {boss.corrections}")
     _writeline(f"  Evidence vault: {VAULT_PATH}")
     _writeline(f"  Log: {LOG_PATH}")
+    _writeline(f"  Temp trace log: {TEMP_LOG_PATH}")
     _writeline(f"{'='*60}")
 
     if args.validate:
