@@ -26,6 +26,7 @@ import requests
 import argparse
 import time
 import traceback
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
@@ -62,10 +63,26 @@ API_MODEL_FILTER = ""
 API_MODEL_PRIORITY = []
 API_CONTEXT_LIMIT = 40000
 API_MAX_OUTPUT_TOKENS = 2048
+API_RETRIES = 3
+API_RETRY_DELAY = 5.0
 API_CALL_TRACE = []
 CURRENT_ROUND_TRACE = None
 SENSENOVA_MODEL = "sensenova-6.7-flash-lite"
 SENSENOVA_KEYS_PATH = os.path.join(ROOT_DIR, "config", "other_sensenova_apikeys")
+
+
+def _env_int(name, default):
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_float(name, default):
+    try:
+        return float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
 
 
 def _resolve_workspace_path(path_value):
@@ -570,6 +587,76 @@ def _coerce_text_tool_call(text, tools):
     return []
 
 
+def _tool_names(tools):
+    return {tool.get("function", {}).get("name") for tool in (tools or [])}
+
+
+def _infer_target_line_from_messages(messages):
+    for msg in reversed(messages or []):
+        content = msg.get("content") or ""
+        match = re.search(r"\bLine\s+(\d+)\s*[:：]", content)
+        if match:
+            return int(match.group(1))
+        match = re.search(r"\bL(\d+)\b", content)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def _fallback_required_tool_call(messages, tools):
+    """Recover when a tool-capable model writes intent text instead of a required tool call."""
+    if "read_novel_lines" not in _tool_names(tools):
+        return []
+    target_line = _infer_target_line_from_messages(messages)
+    if not target_line:
+        return []
+    start = max(1, target_line - 10)
+    args = {"start": start, "count": 25}
+    return [{
+        "id": "recovered_required_read_novel_lines",
+        "type": "function",
+        "function": {"name": "read_novel_lines", "arguments": json.dumps(args, ensure_ascii=False)},
+    }]
+
+
+def _should_retry_model_error(exc):
+    text = str(exc)
+    fatal_markers = (
+        "context budget exceeded",
+        "HTTP 400",
+        "HTTP 401",
+        "HTTP 403",
+        "invalid api key",
+        "unauthorized",
+        "forbidden",
+    )
+    lowered = text.lower()
+    if any(marker.lower() in lowered for marker in fatal_markers):
+        return False
+    if "HTTP 429" in text:
+        return False
+    if isinstance(exc, (requests.exceptions.Timeout, requests.exceptions.ConnectionError)):
+        return True
+    retry_markers = (
+        "Read timed out",
+        "Max retries exceeded",
+        "Connection aborted",
+        "RemoteDisconnected",
+        "HTTP 500",
+        "HTTP 502",
+        "HTTP 503",
+        "HTTP 504",
+    )
+    return any(marker in text for marker in retry_markers)
+
+
+def _sleep_before_retry(attempt):
+    if API_RETRY_DELAY <= 0:
+        return
+    delay = min(API_RETRY_DELAY * (2 ** max(0, attempt - 1)), 60.0)
+    time.sleep(delay)
+
+
 def _extract_int_arg(text, name, default=None):
     match = re.search(rf'["\']?{re.escape(name)}["\']?\s*[:=]\s*["\']?(-?\d+)', text)
     if match:
@@ -673,84 +760,143 @@ def call_api_fallback(messages, tools=None, label=""):
     needs_tools = bool(tools)
     expects_tool = _expects_tool_call(messages, tools)
     errors = []
+    max_attempts = max(1, int(API_RETRIES or 1))
     for model in API_MODELS:
         if not model.available(needs_tools):
             continue
-        try:
-            tool_choice = "auto"
-            if expects_tool and model.name != "agnes":
-                tool_choice = {"type": "function", "function": {"name": "read_novel_lines"}}
-            temp_log_event(
-                "model_call_start",
-                label=label,
-                provider=model.name,
-                model=model.model,
-                model_label=model.label,
-                tools_enabled=bool(tools),
-                expects_tool=expects_tool,
-                tool_choice=tool_choice,
-                api_context_limit=API_CONTEXT_LIMIT,
-                **_message_trace_summary(messages),
-            )
-            text, pec, ec, tool_calls = _api_chat(model, messages, tools=tools, tool_choice=tool_choice)
-            coerced_tool_call = False
-            if not tool_calls:
-                tool_calls = _coerce_text_tool_call(text, tools)
-                coerced_tool_call = bool(tool_calls)
-            if expects_tool and not tool_calls:
+        for attempt in range(1, max_attempts + 1):
+            try:
+                tool_choice = "auto"
+                if expects_tool and model.name != "agnes":
+                    tool_choice = {"type": "function", "function": {"name": "read_novel_lines"}}
                 temp_log_event(
-                    "model_call_rejected",
+                    "model_call_start",
                     label=label,
                     provider=model.name,
                     model=model.model,
                     model_label=model.label,
-                    reason="expected tool call but model returned none",
+                    tools_enabled=bool(tools),
+                    expects_tool=expects_tool,
+                    tool_choice=tool_choice,
+                    attempt=attempt,
+                    max_attempts=max_attempts,
+                    api_context_limit=API_CONTEXT_LIMIT,
+                    **_message_trace_summary(messages),
+                )
+                text, pec, ec, tool_calls = _api_chat(model, messages, tools=tools, tool_choice=tool_choice)
+                coerced_tool_call = False
+                recovered_required_tool_call = False
+                if not tool_calls:
+                    tool_calls = _coerce_text_tool_call(text, tools)
+                    coerced_tool_call = bool(tool_calls)
+                if expects_tool and not tool_calls:
+                    tool_calls = _fallback_required_tool_call(messages, tools)
+                    recovered_required_tool_call = bool(tool_calls)
+                    if recovered_required_tool_call:
+                        temp_log_event(
+                            "model_call_recovered_tool",
+                            label=label,
+                            provider=model.name,
+                            model=model.model,
+                            model_label=model.label,
+                            attempt=attempt,
+                            reason="synthesized required read_novel_lines call from target line",
+                            tool_calls=len(tool_calls),
+                            response_len=len(text or ""),
+                            response_head=(text or "")[:500],
+                        )
+                if expects_tool and not tool_calls:
+                    temp_log_event(
+                        "model_call_rejected",
+                        label=label,
+                        provider=model.name,
+                        model=model.model,
+                        model_label=model.label,
+                        attempt=attempt,
+                        max_attempts=max_attempts,
+                        reason="expected tool call but model returned none",
+                        response_len=len(text or ""),
+                        response_head=(text or "")[:500],
+                    )
+                    err = f"{model.label}: no tool call"
+                    if attempt < max_attempts:
+                        errors.append(f"{err} (attempt {attempt}/{max_attempts})")
+                        temp_log_event(
+                            "model_call_retry",
+                            label=label,
+                            provider=model.name,
+                            model=model.model,
+                            model_label=model.label,
+                            attempt=attempt,
+                            next_attempt=attempt + 1,
+                            reason="no tool call",
+                        )
+                        _sleep_before_retry(attempt)
+                        continue
+                    errors.append(err)
+                    break
+                temp_log_event(
+                    "model_call_success",
+                    label=label,
+                    provider=model.name,
+                    model=model.model,
+                    model_label=model.label,
+                    tools_enabled=bool(tools),
+                    tool_calls=len(tool_calls),
+                    coerced_text_tool_call=coerced_tool_call,
+                    recovered_required_tool_call=recovered_required_tool_call,
+                    attempt=attempt,
+                    prompt_eval_count=pec,
+                    eval_count=ec,
                     response_len=len(text or ""),
                     response_head=(text or "")[:500],
                 )
-                errors.append(f"{model.label}: no tool call")
-                continue
-            temp_log_event(
-                "model_call_success",
-                label=label,
-                provider=model.name,
-                model=model.model,
-                model_label=model.label,
-                tools_enabled=bool(tools),
-                tool_calls=len(tool_calls),
-                coerced_text_tool_call=coerced_tool_call,
-                prompt_eval_count=pec,
-                eval_count=ec,
-                response_len=len(text or ""),
-                response_head=(text or "")[:500],
-            )
-            API_CALL_TRACE.append({
-                "label": label,
-                "provider": model.name,
-                "model": model.model,
-                "model_label": model.label,
-                "tools_enabled": bool(tools),
-                "tool_choice": tool_choice,
-                "tool_calls": len(tool_calls),
-                "coerced_text_tool_call": coerced_tool_call,
-                "prompt_eval_count": pec,
-                "eval_count": ec,
-            })
-            return text, pec, ec, tool_calls
-        except Exception as exc:
-            temp_log_event(
-                "model_call_error",
-                label=label,
-                provider=model.name,
-                model=model.model,
-                model_label=model.label,
-                tools_enabled=bool(tools),
-                error_type=type(exc).__name__,
-                error=str(exc)[:1000],
-                **_message_trace_summary(messages),
-            )
-            errors.append(str(exc)[:160])
-            continue
+                API_CALL_TRACE.append({
+                    "label": label,
+                    "provider": model.name,
+                    "model": model.model,
+                    "model_label": model.label,
+                    "tools_enabled": bool(tools),
+                    "tool_choice": tool_choice,
+                    "tool_calls": len(tool_calls),
+                    "coerced_text_tool_call": coerced_tool_call,
+                    "recovered_required_tool_call": recovered_required_tool_call,
+                    "attempt": attempt,
+                    "prompt_eval_count": pec,
+                    "eval_count": ec,
+                })
+                return text, pec, ec, tool_calls
+            except Exception as exc:
+                temp_log_event(
+                    "model_call_error",
+                    label=label,
+                    provider=model.name,
+                    model=model.model,
+                    model_label=model.label,
+                    tools_enabled=bool(tools),
+                    attempt=attempt,
+                    max_attempts=max_attempts,
+                    error_type=type(exc).__name__,
+                    error=str(exc)[:1000],
+                    **_message_trace_summary(messages),
+                )
+                err = str(exc)[:160]
+                if attempt < max_attempts and _should_retry_model_error(exc):
+                    errors.append(f"{err} (attempt {attempt}/{max_attempts})")
+                    temp_log_event(
+                        "model_call_retry",
+                        label=label,
+                        provider=model.name,
+                        model=model.model,
+                        model_label=model.label,
+                        attempt=attempt,
+                        next_attempt=attempt + 1,
+                        reason=err,
+                    )
+                    _sleep_before_retry(attempt)
+                    continue
+                errors.append(err)
+                break
     detail = "; ".join(errors[-5:]) if errors else "no model available outside cooldown"
     temp_log_event(
         "model_call_failed_all",
@@ -761,8 +907,17 @@ def call_api_fallback(messages, tools=None, label=""):
     )
     raise ModelCallError(f"All API fallback models failed for {label or 'request'}: {detail}")
 
-# Temporary descriptors that need forward name search
-TEMP_DESCRIPTORS = {"女孩", "少年", "老人", "大汉", "年轻人", "男孩", "少女", "妇人", "老妇", "男子", "女子", "青年", "孩子"}
+# Ambiguous descriptive labels that may later resolve to a named character.
+# Keep this generic: do not add novel-specific character names here.
+TEMP_DESCRIPTORS = {
+    "女孩", "少年", "老人", "大汉", "年轻人", "男孩", "少女", "妇人", "老妇",
+    "男子", "女子", "青年", "孩子", "女人", "男人", "姑娘", "小伙子",
+    "老者", "老妇人", "老翁", "男商人", "女商人", "旅行商人", "商人",
+    "兑换商", "皮草商", "店主", "老板", "酒吧老板", "店员", "服务生",
+    "女服务生", "男服务生", "红发女孩", "客人", "男客人", "女客人",
+    "房客", "乞丐", "修女", "祭司", "旅人", "工匠", "磨粉匠", "摊贩",
+    "摊贩老板",
+}
 
 # Forward search patterns for name reveal (must be actual name-introduction, not generic "I am X")
 # Priority order: longer patterns first to avoid partial matches
@@ -1239,6 +1394,14 @@ NON_PERSON_ALIASES = {
     "sound_effect",
     "ambient-sound",
     "ambient_sound",
+    "旁白",
+    "叙述",
+    "叙述者",
+    "音效",
+    "声音",
+    "拟声",
+    "非人物",
+    "非人物发声",
 }
 
 
@@ -1789,19 +1952,26 @@ RULE C: Distinguish "speaker" from "mentioned person"
 - A line like "XX看着YY" describes the observer (XX), not the speaker
 - Look for the pattern: [Narrative about character A + speech verb]「dialogue」→ A is speaker
 
-RULE D: Speaker names - use what the text actually uses
-- Has a specific name → use that name
-- Has a role/group identity but no name → use the role: 村民, 骑士, 商人, 众人
-- Group/collective speech → use the group name, NOT "非人物发声"
-- Temporary descriptor (女孩, 少年, 老汉, 大汉, etc.) → only use if no real name is found after forward search
-- Do NOT make up a name or use the wrong role
+RULE D: Decide quote type BEFORE speaker identity
+- First classify the quoted text: actual character speech, narrator wording, sound effect, title/term, embedded quote, hypothetical "as if saying", or reported speech.
+- If nobody in the scene actually speaks the quoted text, use "非人物发声".
+- If it is actual character/group speech, continue to identify the speaker.
+- Do NOT assign a narrator/sound/title quote to a nearby character just because that character is present.
 
-RULE E: Non-person speech - ONLY for these cases
+RULE E: Speaker names - prefer canonical identity when available
+- If the character has a specific name anywhere in reliable context/state/evidence, output the name, not a generic role.
+- Role or appearance labels (girl, woman, merchant, clerk, guest, craftsman, etc.) are temporary until proven unnamed.
+- If a descriptor/role is linked to a named character by self-introduction, narration, repeated alias evidence, or character state, output the canonical name.
+- If the character is genuinely unnamed, use the most stable descriptive label from the text. Prefer role/function over vague appearance when both are available.
+- Group/collective speech → use the group name, NOT "非人物发声".
+- Do NOT make up a name or use the wrong role.
+
+RULE F: Non-person speech - ONLY for these cases
 - Ambient sounds, object sounds, sound effects → "非人物发声"
 - If the text explicitly says a character made the sound, credit the character
 - Collective shouting/group speech is NOT "非人物发声"
 
-RULE F: Alternating dialogue - specific rules
+RULE G: Alternating dialogue - specific rules
 - Two characters exchanging short lines (<20 chars each) → fast exchange likely
 - If there is NO narrative between two adjacent dialogues, the speaker likely alternates
 - But: if a narrative paragraph appears between two dialogues → the pattern RESETS
@@ -1825,9 +1995,10 @@ WORKFLOW
    b. Is there an alternating pattern?
    c. Did the scene change?
 
-4. If using a temporary descriptor (女孩, 少年, etc.) → search forward 100-200 lines for a name reveal
-   Look for: "我叫XX", "咱的名字是XX", "名字是XX", "吾乃XX"
-   If found → use the revealed name. If not found after 200 lines → use the descriptor.
+4. If using a descriptor/role instead of a name → verify whether it has a named identity.
+   Search nearby context, character state, evidence summaries, and forward/backward text for introductions or alias links.
+   Look for patterns such as "我叫XX", "我是XX", "名字是XX", "吾乃XX", or narration that says the descriptor is named XX.
+   If found → use the revealed name. If not found → keep the stable descriptor.
 
 5. Output with <answer>, <reason>, <summary>. Optionally add <discovery> if you find new character info.
 
@@ -2635,7 +2806,44 @@ class Boss:
 # Validation
 # ============================================================
 
-def validate():
+def _normalize_validation_label(value):
+    value = (value or "").strip()
+    if not value:
+        return ""
+    mapped = validate_char_name(value)
+    if mapped == NON_PERSON_LABEL:
+        return NON_PERSON_LABEL
+    value = mapped or value
+    value = re.sub(r"^[【\[\(（「『\s]+|[】\]\)）」』\s]+$", "", value)
+    return value.strip()
+
+
+def _is_generic_validation_label(value):
+    value = _normalize_validation_label(value)
+    if not value:
+        return True
+    return value == NON_PERSON_LABEL or value in TEMP_DESCRIPTORS
+
+
+def _validation_lenient_match(acceptable, label_parts):
+    normalized_answers = {_normalize_validation_label(part) for part in acceptable}
+    normalized_labels = {_normalize_validation_label(part) for part in label_parts}
+    normalized_answers.discard("")
+    normalized_labels.discard("")
+    if normalized_answers & normalized_labels:
+        return True, "normalized-exact"
+    for answer in normalized_answers:
+        for label in normalized_labels:
+            if not answer or not label:
+                continue
+            if _is_generic_validation_label(answer) or _is_generic_validation_label(label):
+                continue
+            if answer in label or label in answer:
+                return True, "name-contained"
+    return False, ""
+
+
+def validate(error_limit=30):
     if not os.path.exists(LABELED_PATH):
         print("labeled.txt not found")
         return 0, 0, 0
@@ -2663,6 +2871,9 @@ def validate():
 
     total = min(len(labeled), len(answers))
     correct = 0
+    lenient_correct = 0
+    lenient_extra = 0
+    lenient_reasons = Counter()
     wrong = []
 
     for i in range(total):
@@ -2672,16 +2883,25 @@ def validate():
         label_parts = {part.strip() for part in label.split("|") if part.strip()}
         if acceptable & label_parts:
             correct += 1
+            lenient_correct += 1
         else:
+            matched, reason = _validation_lenient_match(acceptable, label_parts)
+            if matched:
+                lenient_correct += 1
+                lenient_extra += 1
+                lenient_reasons[reason] += 1
             wrong.append({
                 "idx": i + 1,
                 "answer_line": answer_line_nums[i] if i < len(answer_line_nums) else "?",
                 "answer_marker": answer_marker_nums[i] if i < len(answer_marker_nums) else "?",
                 "expected": answer,
                 "got": label,
+                "lenient_match": matched,
+                "lenient_reason": reason,
             })
 
     accuracy = correct / total * 100 if total > 0 else 0
+    lenient_accuracy = lenient_correct / total * 100 if total > 0 else 0
 
     print(f"\n{'='*60}")
     print(f"  Validation Report")
@@ -2694,6 +2914,11 @@ def validate():
     print(f"  Correct:         {correct}")
     print(f"  Wrong:           {len(wrong)}")
     print(f"  Accuracy:        {accuracy:.1f}%")
+    print(f"  Lenient correct: {lenient_correct} (+{lenient_extra})")
+    print(f"  Lenient accuracy:{lenient_accuracy:.1f}%")
+    if lenient_reasons:
+        reason_text = ", ".join(f"{name}={count}" for name, count in lenient_reasons.most_common())
+        print(f"  Lenient reasons: {reason_text}")
     if multi_marker_lines:
         examples = ", ".join(
             f"L{line_no}({count})" for line_no, count in multi_marker_lines[:8]
@@ -2706,10 +2931,15 @@ def validate():
         print(f"  WARNING: labeled line count ({len(labeled)}) != answer marker count ({len(answers)})")
 
     if wrong:
-        print(f"\n  Error details (first 30):")
-        for w in wrong[:30]:
+        shown_wrong = wrong if error_limit <= 0 else wrong[:error_limit]
+        label = "all" if error_limit <= 0 else f"first {error_limit}"
+        print(f"\n  Error details ({label}):")
+        for w in shown_wrong:
             marker_suffix = "" if w["answer_marker"] == 1 else f" marker#{w['answer_marker']}"
-            print(f"    #{w['idx']} (answer L{w['answer_line']}{marker_suffix}): expected={w['expected']} | got={w['got']}")
+            extra = ""
+            if w["lenient_match"]:
+                extra = f" | lenient={w['lenient_reason']}"
+            print(f"    #{w['idx']} (answer L{w['answer_line']}{marker_suffix}): expected={w['expected']} | got={w['got']}{extra}")
 
     return total, correct, len(wrong)
 
@@ -2724,12 +2954,14 @@ def _writeline(msg):
 
 
 def main():
-    global API_MODEL_FILTER, API_MODEL_PRIORITY, MODEL_PROVIDER
+    global API_MODEL_FILTER, API_MODEL_PRIORITY, MODEL_PROVIDER, API_RETRIES, API_RETRY_DELAY
     parser = argparse.ArgumentParser(description="Multi-agent novel dialogue speaker annotation v4")
     parser.add_argument("--start", type=int, default=0, help="Start from dialogue index (0=resume)")
     parser.add_argument("--count", type=int, default=1, help="Number of dialogues to annotate")
     parser.add_argument("--short-mem", type=int, default=20, help="Short-term memory rounds")
     parser.add_argument("--validate", action="store_true", help="Run validation after annotation")
+    parser.add_argument("--error-limit", type=int, default=_env_int("NOVEL_VALIDATE_ERROR_LIMIT", 30),
+                        help="Validation error rows to print; 0 means all")
     parser.add_argument("--reset-state", action="store_true", help="Reset character state before starting")
     parser.add_argument("--data-dir", default=os.environ.get("NOVEL_DATA_DIR", ""),
                         help="Per-volume data directory containing novel.txt/answers.txt and output state")
@@ -2754,6 +2986,10 @@ def main():
     parser.add_argument("--health-check", choices=["all", "first", "none"],
                         default=os.environ.get("NOVEL_API_HEALTH_CHECK", "all"),
                         help="API startup health checks: all models, first priority model only, or none")
+    parser.add_argument("--api-retries", type=int, default=_env_int("NOVEL_API_RETRIES", API_RETRIES),
+                        help="Attempts per API model for transient errors and missing required tool calls")
+    parser.add_argument("--api-retry-delay", type=float, default=_env_float("NOVEL_API_RETRY_DELAY", API_RETRY_DELAY),
+                        help="Base seconds for exponential retry delay")
     args = parser.parse_args()
     configure_paths(
         data_dir=args.data_dir,
@@ -2767,6 +3003,8 @@ def main():
     MODEL_PROVIDER = args.provider
     API_MODEL_FILTER = args.api_model.strip()
     API_MODEL_PRIORITY = [item.strip() for item in args.api_priority.split(",") if item.strip()]
+    API_RETRIES = max(1, args.api_retries)
+    API_RETRY_DELAY = max(0.0, args.api_retry_delay)
 
     print("=" * 60)
     print("  Multi-agent Novel Dialogue Speaker Annotation v4")
@@ -2785,6 +3023,7 @@ def main():
             print(f"  API model filter: {API_MODEL_FILTER}")
         if API_MODEL_PRIORITY:
             print(f"  API model priority: {', '.join(API_MODEL_PRIORITY)}")
+        print(f"  API retries: {API_RETRIES} (base delay {API_RETRY_DELAY:g}s)")
         print(f"  API health check: {args.health_check}")
     print(f"  Short-term memory: {args.short_mem} rounds")
     print(f"  Token budget: {TOKEN_BUDGET}")
@@ -2841,7 +3080,7 @@ def main():
     if args.count <= 0:
         print("  Count is 0; configuration check only, no annotation requested.")
         if args.validate:
-            validate()
+            validate(error_limit=args.error_limit)
         return
 
     start_idx = args.start if args.start > 0 else labeled_count
@@ -2947,7 +3186,7 @@ def main():
     _writeline(f"{'='*60}")
 
     if args.validate:
-        validate()
+        validate(error_limit=args.error_limit)
 
 
 if __name__ == "__main__":
