@@ -2,8 +2,8 @@
 """
 SearchAgent - dedicated identity investigator triggered by temporary names.
 
-When Labeler outputs a temporary descriptor (女孩, 少年, 大汉, etc.),
-SearchAgent searches the novel for the character's actual name.
+When Labeler outputs a temporary descriptor or role label, SearchAgent searches
+the novel for the character's actual name.
 """
 
 import json
@@ -12,7 +12,7 @@ import re
 SEARCH_SYSTEM_PROMPT = """You are a novel identity investigator. Your job is to find the real identity of temporary character descriptors.
 
 ## Your task
-When you receive a temporary/ambiguous descriptor (like 女孩/少年/老人/少女/男子/大汉), search the novel to find that character's actual name.
+When you receive a temporary/ambiguous descriptor or role label, search the novel to find that character's actual name.
 
 ## Investigation Strategy
 1. First, read 10-20 lines around the target line to understand context.
@@ -67,7 +67,7 @@ class SearchAgent:
             pass
 
     def investigate(self, temp_name, around_line, max_tool_rounds=4, quiet=False):
-        from run_label import TOOL_READ_NOVEL
+        from run_label import TOOL_READ_NOVEL, normalize_tool_call, parse_tool_arguments
         TOOL_DEEP_SEARCH = {
             "type": "function",
             "function": {
@@ -128,25 +128,55 @@ class SearchAgent:
             if not tool_calls:
                 break
 
+            parsed_tool_calls = []
+            for tc in tool_calls:
+                func = tc.get("function", {})
+                raw_args = func.get("arguments", {})
+                name = func.get("name", "")
+                func_args, parse_error = parse_tool_arguments(name, raw_args)
+                parsed_tool_calls.append({
+                    "tool_call": normalize_tool_call(tc, func_args),
+                    "function": name,
+                    "arguments": func_args,
+                    "parse_error": parse_error,
+                })
+
+            first_call = parsed_tool_calls[0] if parsed_tool_calls else {}
             tool_call_log.append({
                 "round": round_i + 1,
-                "function": tool_calls[0].get("function", {}).get("name", ""),
-                "args": tool_calls[0].get("function", {}).get("arguments", {}),
+                "function": first_call.get("function", ""),
+                "args": first_call.get("arguments", {}),
+                "parse_error": first_call.get("parse_error", ""),
                 "pec": pec,
                 "ec": ec
             })
 
-            messages.append({"role": "assistant", "content": text, "tool_calls": tool_calls})
+            messages.append({
+                "role": "assistant",
+                "content": text,
+                "tool_calls": [item["tool_call"] for item in parsed_tool_calls],
+            })
 
-            for tc in tool_calls:
-                func = tc.get("function", {})
-                raw_args = func.get("arguments", {})
-                func_args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
-                name = func.get("name", "")
+            for item in parsed_tool_calls:
+                name = item["function"]
+                func_args = item["arguments"]
+                parse_error = item["parse_error"]
+
+                if parse_error and not func_args:
+                    result = f"Tool arguments invalid: {parse_error}. Call the tool again with valid JSON arguments."
+                    if not quiet:
+                        self._safe_print(f"    [SearchAgent] invalid tool args for {name}: {parse_error}")
+                    messages.append({"role": "tool", "content": result})
+                    continue
 
                 if name == "read_novel_lines":
-                    s = func_args.get("start", 1)
-                    c = func_args.get("count", 10)
+                    try:
+                        s = int(func_args.get("start", 1) or 1)
+                        c = int(func_args.get("count", 10) or 10)
+                    except (TypeError, ValueError):
+                        result = "Tool arguments invalid: start and count must be integers. Call read_novel_lines again with valid JSON."
+                        messages.append({"role": "tool", "content": result})
+                        continue
                     result = self.read_novel(s, c)
                     self.tool_call_count += 1
                     if not quiet:
@@ -154,9 +184,18 @@ class SearchAgent:
                     messages.append({"role": "tool", "content": result})
                 elif name == "deep_search_identity":
                     tn = func_args.get("temp_name", temp_name)
-                    al = func_args.get("around_line", around_line)
-                    fwd = func_args.get("search_forward", 200)
-                    bwd = func_args.get("search_backward", 100)
+                    try:
+                        al = int(func_args.get("around_line", around_line) or around_line)
+                    except (TypeError, ValueError):
+                        al = around_line
+                    try:
+                        fwd = int(func_args.get("search_forward", 200) or 200)
+                    except (TypeError, ValueError):
+                        fwd = 200
+                    try:
+                        bwd = int(func_args.get("search_backward", 100) or 100)
+                    except (TypeError, ValueError):
+                        bwd = 100
                     result = self.deep_search(tn, al, fwd, bwd)
                     self.tool_call_count += 1
                     if not quiet:
@@ -164,11 +203,17 @@ class SearchAgent:
                     messages.append({"role": "tool", "content": result})
                 elif name == "find_all_references":
                     n = func_args.get("name", "")
-                    mr = func_args.get("max_results", 10)
+                    try:
+                        mr = int(func_args.get("max_results", 10) or 10)
+                    except (TypeError, ValueError):
+                        mr = 10
                     result = self.find_refs(n, mr)
                     self.tool_call_count += 1
                     if not quiet:
                         self._safe_print(f"    [SearchAgent] find_references('{n}') -> {len(result)} chars")
+                    messages.append({"role": "tool", "content": result})
+                else:
+                    result = f"Unsupported tool '{name}'. Use read_novel_lines, deep_search_identity, or find_all_references."
                     messages.append({"role": "tool", "content": result})
         else:
             if not quiet:
