@@ -7,6 +7,7 @@ config/
 config/*key*
 *.key
 apikey.txt
+.githubtoken.txt
 
 # Python cache
 __pycache__/
