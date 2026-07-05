@@ -912,11 +912,12 @@ def call_api_fallback(messages, tools=None, label=""):
 TEMP_DESCRIPTORS = {
     "女孩", "少年", "老人", "大汉", "年轻人", "男孩", "少女", "妇人", "老妇",
     "男子", "女子", "青年", "孩子", "女人", "男人", "姑娘", "小伙子",
-    "老者", "老妇人", "老翁", "男商人", "女商人", "旅行商人", "商人",
+    "老者", "老妇人", "老翁", "对方", "陌生人", "路人", "来客", "访客",
+    "男商人", "女商人", "年轻商人", "老商人", "中年商人", "旅行商人", "行商人", "商人",
     "兑换商", "皮草商", "店主", "老板", "酒吧老板", "店员", "服务生",
     "女服务生", "男服务生", "红发女孩", "客人", "男客人", "女客人",
     "房客", "乞丐", "修女", "祭司", "旅人", "工匠", "磨粉匠", "摊贩",
-    "摊贩老板",
+    "摊贩老板", "车夫", "船夫", "守卫", "卫兵", "士兵", "神父",
 }
 
 # Forward search patterns for name reveal (must be actual name-introduction, not generic "I am X")
@@ -1096,6 +1097,12 @@ def log_agent(round_log, agent_name, role, input_messages, response_text, pec, e
 # ============================================================
 # Utility functions
 # ============================================================
+
+SPEECH_ATTRIBUTION_RE = re.compile(
+    r"(说(?:道|着|完|了)?|问(?:道)?|回答|答道|喊(?:道)?|叫(?:道)?|开口|"
+    r"低语|嘀咕|喃喃|叹(?:道|息)?|笑(?:道)?|补充|继续说|表示)"
+)
+
 
 def read_novel_lines(start, count):
     """Read lines from novel.txt. start is 1-based."""
@@ -1777,6 +1784,27 @@ class ShortMemAgent:
                 return speakers[1] if speakers[0] == last else speakers[0]
         return None
 
+    def get_recent_speakers_hint(self):
+        """Compact speaker-order hint for the Labeler."""
+        if not self.history:
+            return ""
+        recent = [speaker for _, _, speaker, _, _ in self.history[-8:]]
+        unique = []
+        for speaker in recent:
+            if speaker not in unique:
+                unique.append(speaker)
+        lines = ["[Recent speaker order]"]
+        lines.append("  " + " -> ".join(recent))
+        lines.append(f"  Last speaker: {recent[-1]}")
+        if len(unique) == 2:
+            next_expected = self.get_next_expected()
+            pair = f"{unique[0]} <-> {unique[1]}"
+            if next_expected:
+                lines.append(f"  Possible two-person exchange: {pair}; next expected if no narrative break: {next_expected}")
+            else:
+                lines.append(f"  Possible two-person exchange: {pair}")
+        return "\n".join(lines)
+
     def get_summary(self):
         if not self.history:
             return "(No prior annotations)"
@@ -1891,7 +1919,7 @@ class LabelerAgent:
 
     def label(self, line_num, dialogue, short_mem_text, fact_summary,
                char_state_text, navigation_text, scene_summary, round_log, quiet=False,
-               override_force_tool=True, recent_speakers_hint=""):
+               override_force_tool=True, recent_speakers_hint="", structure_hint=""):
         """
         Label one dialogue's speaker. Returns (speaker, summary, reason, pec, ec).
         """
@@ -1978,6 +2006,8 @@ RULE G: Alternating dialogue - specific rules
 - One character CAN speak multiple consecutive lines (not always alternating)
 - RULE: If immediate narrative contains a speech verb → that overrides ALL alternating patterns
 - RULE: If there is no speech verb AND no narrative between → use alternating + who-last-spoke
+- Use [Local dialogue structure] as a map: it tells you whether the previous dialogue is separated by narrative.
+- Use [Recent speaker order] only after checking local text; it is a clue, not proof.
 
 ========================================
 WORKFLOW
@@ -2039,6 +2069,8 @@ Short-term memory labels and character state are reference only.
 
 [Original Text Navigation - around target line]
 {navigation_text}
+
+{structure_hint}
 
 {short_mem_text}
 
@@ -2287,7 +2319,7 @@ class VerifierAgent:
 
     def verify(self, line_num, dialogue, navigation_text, short_mem_text,
                scene_summary, char_state_text, labeler_speaker, round_log, quiet=False,
-               risk_reasons=None):
+               risk_reasons=None, structure_hint=""):
         """
         Independent verification. Returns (verdict, suggested_speaker, reason).
         verdict: "confirm" or "disagree"
@@ -2311,6 +2343,8 @@ RULES:
   keep that character as the speaker unless there is stronger contrary evidence.
 - For quote_or_letter/password_or_signal/sound_effect/thought_not_spoken, be careful: the correct label may be 非人物发声, a signal, or the attributed source rather than the nearby character
 - For rapid two-person exchanges, do not rely on alternation alone; cite the local narrative or adjacent dialogue structure
+- If there is no non-dialogue narrative between adjacent short dialogues and no explicit speech attribution,
+  high-confidence alternation may be a valid reason to disagree.
 - Be conservative. Disagree only when explicit local evidence contradicts the primary answer.
 - evidence_basis=explicit_attribution only when the local text directly attributes the target quote to a source
   with a speech/thought verb such as says, asks, answers, continues, wants to say, or looks as if saying.
@@ -2343,6 +2377,8 @@ Risk reasons that triggered verification:
 ========================================
 Original text navigation:
 {compact_navigation}
+
+{structure_hint}
 
 {compact_short_mem}
 
@@ -2440,6 +2476,8 @@ Risk reasons:
 [Compact local navigation]
 {compact_navigation}
 
+{structure_hint}
+
 [Tool result]
 {compact_text(chr(10).join(tool_results), 12000, keep="tail")}
 
@@ -2522,6 +2560,79 @@ class Boss:
             find_refs_fn=find_all_references
         )
 
+    def _find_dialogue_index(self, line_num, dialogue):
+        """Find the target dialogue in the extracted dialogue list."""
+        for idx, (ln, text) in enumerate(self.dialogue_list):
+            if ln == line_num and text == dialogue:
+                return idx
+        for idx, (ln, text) in enumerate(self.dialogue_list):
+            if ln == line_num:
+                return idx
+        return None
+
+    def _local_dialogue_structure(self, line_num, dialogue):
+        """Analyze local dialogue structure without using any answer labels."""
+        idx = self._find_dialogue_index(line_num, dialogue)
+        prev_dialogue = self.dialogue_list[idx - 1] if idx is not None and idx > 0 else None
+        next_dialogue = (
+            self.dialogue_list[idx + 1]
+            if idx is not None and idx + 1 < len(self.dialogue_list)
+            else None
+        )
+
+        with open(NOVEL_PATH, "r", encoding="utf-8") as f:
+            novel_lines = [line.rstrip("\n") for line in f.readlines()]
+
+        narrative_between = []
+        if prev_dialogue:
+            prev_line = prev_dialogue[0]
+            for ln in range(prev_line + 1, line_num):
+                if 1 <= ln <= len(novel_lines):
+                    text = novel_lines[ln - 1].strip()
+                    if text and "「" not in text:
+                        narrative_between.append((ln, text[:80]))
+
+        local_start = max(1, line_num - 3)
+        local_end = min(len(novel_lines), line_num + 2)
+        local_text = "\n".join(novel_lines[local_start - 1:local_end])
+        has_attribution = bool(SPEECH_ATTRIBUTION_RE.search(local_text))
+
+        return {
+            "index": idx,
+            "previous": prev_dialogue,
+            "next": next_dialogue,
+            "narrative_between": narrative_between,
+            "no_narrative_break_from_previous": bool(prev_dialogue and not narrative_between),
+            "has_nearby_attribution_word": has_attribution,
+            "local_start": local_start,
+            "local_end": local_end,
+        }
+
+    def _format_structure_hint(self, structure):
+        lines = ["[Local dialogue structure]"]
+        prev_dialogue = structure.get("previous")
+        next_dialogue = structure.get("next")
+        if prev_dialogue:
+            lines.append(f"  Previous dialogue: L{prev_dialogue[0]}「{prev_dialogue[1][:40]}」")
+        else:
+            lines.append("  Previous dialogue: none")
+        if next_dialogue:
+            lines.append(f"  Next dialogue: L{next_dialogue[0]}「{next_dialogue[1][:40]}」")
+        if structure.get("no_narrative_break_from_previous"):
+            lines.append("  No non-dialogue narrative line between previous dialogue and target.")
+            lines.append("  If this is a two-person exchange and no explicit attribution exists, consider alternation.")
+        elif structure.get("narrative_between"):
+            examples = "; ".join(
+                f"L{ln}: {text}" for ln, text in structure["narrative_between"][:3]
+            )
+            lines.append(f"  Narrative break before target: {examples}")
+            lines.append("  A narrative break resets simple alternation unless it explicitly attributes speech.")
+        lines.append(
+            "  Nearby attribution words: "
+            + ("present" if structure.get("has_nearby_attribution_word") else "not obvious")
+        )
+        return "\n".join(lines)
+
     def _build_navigation(self, line_num, nav_range=25):
         """Build original text navigation around target line - NO speaker labels."""
         lines = []
@@ -2567,19 +2678,35 @@ class Boss:
         han_count = len(re.findall(r"[\u4e00-\u9fff]", text))
         return len(text) <= 12 or han_count <= 4
 
-    def _risk_reasons(self, speaker, dialogue, tool_rounds_used, next_expected):
+    def _risk_reasons(self, speaker, dialogue, tool_rounds_used, next_expected, local_structure=None):
         """Return generic risk reasons that should trigger independent review."""
         reasons = []
         normalized = (speaker or "").strip()
         short_fragment = self._is_short_or_fragment(dialogue)
         phase_conflict = bool(next_expected and normalized and normalized != next_expected)
+        no_narrative_break = bool(
+            local_structure and local_structure.get("no_narrative_break_from_previous")
+        )
 
+        if normalized == "?":
+            reasons.append("speaker unresolved")
         if normalized in TEMP_DESCRIPTORS:
             reasons.append("speaker is a temporary descriptor and may need identity verification")
         if validate_char_name(normalized) == NON_PERSON_LABEL:
             reasons.append("speaker is non-person; quote type should be verified")
-        if phase_conflict and (short_fragment or tool_rounds_used <= 1):
-            reasons.append("speaker conflicts with recent two-person exchange expectation")
+        if phase_conflict:
+            if no_narrative_break:
+                reasons.append("speaker conflicts with adjacent two-person exchange without narrative break")
+            elif short_fragment or tool_rounds_used <= 1:
+                reasons.append("speaker conflicts with recent two-person exchange expectation")
+        if no_narrative_break and self.short_mem.detect_rapid_exchange(3) and short_fragment:
+            reasons.append("short line follows adjacent dialogue without narrative break")
+        if (
+            local_structure
+            and local_structure.get("has_nearby_attribution_word")
+            and (phase_conflict or normalized in TEMP_DESCRIPTORS or normalized == "?")
+        ):
+            reasons.append("nearby speech attribution words should be checked")
         if self.short_mem.detect_rapid_exchange(4) and short_fragment:
             reasons.append("short or fragmentary line inside a rapid exchange")
         if reasons and tool_rounds_used <= 1 and short_fragment:
@@ -2600,16 +2727,36 @@ class Boss:
             return False
 
         current_is_concrete = self._is_concrete_speaker(current)
-        if proposed == NON_PERSON_LABEL and current_is_concrete:
-            return False
 
         basis = (evidence_basis or "unknown").strip().lower()
         conf = (confidence or "low").strip().lower()
-        strong_bases = {"explicit_attribution", "quote_type"}
-        if basis not in strong_bases or conf not in {"high", "certain"}:
+        if conf not in {"high", "certain"}:
             return False
 
         reason = (verifier_reason or "").lower()
+        nonperson_strong_phrases = (
+            "not actual speech", "not direct speech", "narrative text",
+            "narrative description", "title", "term", "sound effect",
+            "nobody is speaking", "no character is speaking",
+            "不是实际发言", "不是直接发言", "叙述文字", "叙述内容",
+            "标题", "术语", "音效", "无人说出", "没有角色说出",
+        )
+        if proposed == NON_PERSON_LABEL and current_is_concrete:
+            if basis != "quote_type" or not any(p in reason for p in nonperson_strong_phrases):
+                return False
+
+        if basis in {"alternation", "dialogue_structure", "dialogue structure"}:
+            alternation_strong_phrases = (
+                "no narrative", "without narrative", "no intervening narrative",
+                "adjacent dialogue", "rapid exchange", "alternating",
+                "没有叙述", "无叙述", "相邻对话", "连续对话", "快速对话", "交替",
+            )
+            return any(p in reason for p in alternation_strong_phrases)
+
+        strong_bases = {"explicit_attribution", "quote_type"}
+        if basis not in strong_bases:
+            return False
+
         weak_phrases = (
             "alternating", "dialogue structure", "dialogue flow", "natural response",
             "交替", "对话结构", "对话逻辑", "自然回应",
@@ -2625,7 +2772,11 @@ class Boss:
             "not direct speech", "narrative text", "narrative description",
             "不是直接发言", "叙述文字", "叙述内容",
         )
-        if current_is_concrete and any(p in reason for p in narrative_non_person_phrases):
+        if (
+            current_is_concrete
+            and proposed != NON_PERSON_LABEL
+            and any(p in reason for p in narrative_non_person_phrases)
+        ):
             return False
 
         return True
@@ -2642,10 +2793,13 @@ class Boss:
         # 1. Build context: Novel Map (structure overview) + navigation (full text)
         context_text = build_context_index(line_num, 40)
         navigation_text = self._build_navigation(line_num, nav_range=25)
+        local_structure = self._local_dialogue_structure(line_num, dialogue)
+        structure_hint = self._format_structure_hint(local_structure)
 
         # 2. Get evidence and memory
         evidence_text = self.vault.get_state_text(current_line=line_num)
         short_mem_text = self.short_mem.get_summary()
+        recent_speakers_hint = self.short_mem.get_recent_speakers_hint()
 
         # 3. Detect rapid exchange for extra warning
         if self.short_mem.detect_rapid_exchange(4):
@@ -2658,8 +2812,10 @@ class Boss:
             "dialogue_line": line_num,
             "dialogue_text": dialogue,
             "short_mem": short_mem_text,
+            "recent_speakers_hint": recent_speakers_hint,
             "evidence": evidence_text,
             "navigation": navigation_text,
+            "local_structure": local_structure,
         }
         temp_log_event(
             "round_context_ready",
@@ -2675,7 +2831,8 @@ class Boss:
             line_num, dialogue, short_mem_text, "",
             evidence_text, navigation_text, "",
             round_log, quiet=quiet, override_force_tool=True,
-            recent_speakers_hint=""
+            recent_speakers_hint=recent_speakers_hint,
+            structure_hint=structure_hint,
         )
         self.total_tokens += pec + ec
 
@@ -2740,16 +2897,20 @@ class Boss:
         # 8b. Generic risk review. This deliberately avoids novel-specific
         # names or organizations; it only checks ambiguity patterns that occur
         # across novels.
-        risk_reasons = self._risk_reasons(speaker, dialogue, tool_rounds_used, next_exp)
+        risk_reasons = self._risk_reasons(
+            speaker, dialogue, tool_rounds_used, next_exp, local_structure=local_structure
+        )
         if risk_reasons:
             if not quiet:
                 self._safe_print(f"  Risk review: {', '.join(risk_reasons)}")
             temp_log_event("risk_review_start", round_log, speaker=speaker, reasons=risk_reasons)
             try:
                 verdict, suggested, verifier_reason, evidence_basis, confidence = self.verifier.verify(
-                    line_num, dialogue, navigation_text, short_mem_text,
+                    line_num, dialogue, navigation_text,
+                    f"{short_mem_text}\n\n{recent_speakers_hint}".strip(),
                     "", evidence_text, speaker, round_log, quiet=quiet,
-                    risk_reasons=risk_reasons
+                    risk_reasons=risk_reasons,
+                    structure_hint=structure_hint,
                 )
             except Exception as exc:
                 verdict = "skipped"
