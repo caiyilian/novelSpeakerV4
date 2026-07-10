@@ -4011,6 +4011,9 @@ def main():
                         help="When using api-fallback, restrict calls to one provider/model substring")
     parser.add_argument("--api-priority", default=os.environ.get("NOVEL_API_PRIORITY", ""),
                         help="Comma-separated provider/model names to move to the front of api-fallback order")
+    parser.add_argument("--api-round-robin-offset", type=int,
+                        default=_env_int("NOVEL_API_ROUND_ROBIN_OFFSET", 0),
+                        help="Initial offset for every API round-robin key pool; use different offsets for parallel runs")
     parser.add_argument("--health-check", choices=["all", "first", "none"],
                         default=os.environ.get("NOVEL_API_HEALTH_CHECK", "all"),
                         help="API startup health checks: all models, first priority model only, or none")
@@ -4066,6 +4069,15 @@ def main():
 
     if MODEL_PROVIDER == "api-fallback":
         init_api_fallback(health_check=args.health_check)
+        if args.api_round_robin_offset:
+            groups = {model.round_robin_group for model in API_MODELS if model.round_robin_group}
+            for group in groups:
+                API_ROUND_ROBIN_CURSOR[group] = args.api_round_robin_offset
+            if groups:
+                print(
+                    "  API round-robin offset: "
+                    f"{args.api_round_robin_offset} for {', '.join(sorted(groups))}"
+                )
 
     # Roster check
     try:
