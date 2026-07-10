@@ -30,6 +30,14 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
+from dialogue_ensemble import (
+    build_dialogue_packet,
+    citations_are_local,
+    format_dialogue_packet,
+    get_tag as get_ensemble_tag,
+    parse_line_citations,
+)
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(SCRIPT_DIR)
 
@@ -70,6 +78,7 @@ CURRENT_ROUND_TRACE = None
 API_ROUND_ROBIN_CURSOR = {}
 SENSENOVA_MODEL = "sensenova-6.7-flash-lite"
 SENSENOVA_KEYS_PATH = os.path.join(ROOT_DIR, "config", "other_sensenova_apikeys")
+DECISION_MODE = os.environ.get("NOVEL_DECISION_MODE", "ensemble").strip().lower()
 
 
 def _env_int(name, default):
@@ -84,6 +93,10 @@ def _env_float(name, default):
         return float(os.environ.get(name, default))
     except (TypeError, ValueError):
         return default
+
+
+DIALOGUE_BLOCK_RADIUS = _env_int("NOVEL_DIALOGUE_BLOCK_RADIUS", 4)
+QUALITY_REQUEST_TIMEOUT = _env_int("NOVEL_QUALITY_REQUEST_TIMEOUT", 120)
 
 
 def _resolve_workspace_path(path_value):
@@ -459,7 +472,7 @@ def _openai_messages(messages):
     return converted
 
 
-def _api_chat(model, messages, tools=None, tool_choice="auto"):
+def _api_chat(model, messages, tools=None, tool_choice="auto", request_timeout=300):
     estimated_tokens = _estimate_message_tokens(messages)
     if estimated_tokens + API_MAX_OUTPUT_TOKENS > API_CONTEXT_LIMIT:
         raise ModelCallError(
@@ -480,7 +493,7 @@ def _api_chat(model, messages, tools=None, tool_choice="auto"):
         payload["tool_choice"] = tool_choice
     with requests.Session() as session:
         session.trust_env = model.use_env_proxy
-        resp = session.post(model.chat_url, headers=headers, json=payload, timeout=300)
+        resp = session.post(model.chat_url, headers=headers, json=payload, timeout=request_timeout)
     model.last_call_at = time.time()
     if resp.status_code == 429:
         model.mark_failure("rate limited", cooldown=120)
@@ -684,6 +697,16 @@ def _should_retry_model_error(exc):
     return any(marker in text for marker in retry_markers)
 
 
+def _should_failover_to_next_model(exc, model):
+    """Avoid retrying one stalled account when a round-robin pool has peers."""
+    if not getattr(model, "round_robin_group", ""):
+        return False
+    if isinstance(exc, (requests.exceptions.Timeout, requests.exceptions.ConnectionError)):
+        return True
+    text = str(exc).lower()
+    return any(marker in text for marker in ("read timed out", "connection aborted", "max retries exceeded"))
+
+
 def _cooldown_for_model_error(exc):
     text = str(exc)
     lowered = text.lower()
@@ -803,10 +826,11 @@ def compact_text(text, max_chars, keep="tail"):
     return marker + text[-keep_chars:]
 
 
-def call_api_fallback(messages, tools=None, label=""):
+def call_api_fallback(messages, tools=None, label="", request_timeout=None, tool_choice="auto"):
     global API_CALL_TRACE
     needs_tools = bool(tools)
     expects_tool = _expects_tool_call(messages, tools)
+    effective_timeout = max(1, int(request_timeout or 300))
     errors = []
     max_attempts = max(1, int(API_RETRIES or 1))
     for model in _api_model_iteration_order():
@@ -814,9 +838,9 @@ def call_api_fallback(messages, tools=None, label=""):
             continue
         for attempt in range(1, max_attempts + 1):
             try:
-                tool_choice = "auto"
+                effective_tool_choice = tool_choice
                 if expects_tool and model.name != "agnes":
-                    tool_choice = {"type": "function", "function": {"name": "read_novel_lines"}}
+                    effective_tool_choice = {"type": "function", "function": {"name": "read_novel_lines"}}
                 temp_log_event(
                     "model_call_start",
                     label=label,
@@ -826,13 +850,20 @@ def call_api_fallback(messages, tools=None, label=""):
                     round_robin_group=model.round_robin_group,
                     tools_enabled=bool(tools),
                     expects_tool=expects_tool,
-                    tool_choice=tool_choice,
+                    tool_choice=effective_tool_choice,
                     attempt=attempt,
                     max_attempts=max_attempts,
                     api_context_limit=API_CONTEXT_LIMIT,
+                    request_timeout=effective_timeout,
                     **_message_trace_summary(messages),
                 )
-                text, pec, ec, tool_calls = _api_chat(model, messages, tools=tools, tool_choice=tool_choice)
+                text, pec, ec, tool_calls = _api_chat(
+                    model,
+                    messages,
+                    tools=tools,
+                    tool_choice=effective_tool_choice,
+                    request_timeout=effective_timeout,
+                )
                 coerced_tool_call = False
                 recovered_required_tool_call = False
                 if not tool_calls:
@@ -911,7 +942,7 @@ def call_api_fallback(messages, tools=None, label=""):
                     "model_label": model.label,
                     "round_robin_group": model.round_robin_group,
                     "tools_enabled": bool(tools),
-                    "tool_choice": tool_choice,
+                    "tool_choice": effective_tool_choice,
                     "tool_calls": len(tool_calls),
                     "coerced_text_tool_call": coerced_tool_call,
                     "recovered_required_tool_call": recovered_required_tool_call,
@@ -936,6 +967,20 @@ def call_api_fallback(messages, tools=None, label=""):
                     **_message_trace_summary(messages),
                 )
                 err = str(exc)[:160]
+                if _should_failover_to_next_model(exc, model):
+                    errors.append(err)
+                    model.mark_failure(err, cooldown=_cooldown_for_model_error(exc))
+                    temp_log_event(
+                        "model_call_failover",
+                        label=label,
+                        provider=model.name,
+                        model=model.model,
+                        model_label=model.label,
+                        round_robin_group=model.round_robin_group,
+                        attempt=attempt,
+                        reason="transient round-robin member failure; trying next model",
+                    )
+                    break
                 if attempt < max_attempts and _should_retry_model_error(exc):
                     errors.append(f"{err} (attempt {attempt}/{max_attempts})")
                     temp_log_event(
@@ -1356,9 +1401,15 @@ def write_label(name):
         f.write(name + "\n")
 
 
-def call_ollama(messages, tools=None, label=""):
+def call_ollama(messages, tools=None, label="", request_timeout=None, tool_choice="auto"):
     if MODEL_PROVIDER == "api-fallback":
-        return call_api_fallback(messages, tools=tools, label=label)
+        return call_api_fallback(
+            messages,
+            tools=tools,
+            label=label,
+            request_timeout=request_timeout,
+            tool_choice=tool_choice,
+        )
 
     url = f"{OLLAMA_BASE_URL}/api/chat"
     payload = {
@@ -1378,7 +1429,7 @@ def call_ollama(messages, tools=None, label=""):
         **_message_trace_summary(messages),
     )
     try:
-        resp = requests.post(url, json=payload, timeout=300)
+        resp = requests.post(url, json=payload, timeout=max(1, int(request_timeout or 300)))
         data = resp.json()
         pec = data.get("prompt_eval_count", 0)
         ec = data.get("eval_count", 0)
@@ -1450,6 +1501,50 @@ TOOL_SEARCH_NOVEL = {
 }
 
 LABELER_TOOLS = [TOOL_READ_NOVEL, TOOL_SEARCH_NOVEL]
+
+QUALITY_OUTPUT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "submit_review",
+        "description": "Submit one structured, evidence-cited quality review decision.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "speaker": {"type": "string"},
+                "target_speaker": {"type": "string"},
+                "preferred_speaker": {"type": "string"},
+                "block_assignments": {"type": "string"},
+                "quote_type": {
+                    "type": "string",
+                    "enum": [
+                        "direct_speech", "group_speech", "embedded_quote",
+                        "thought_or_narration", "sound_or_text", "unclear",
+                    ],
+                },
+                "voice_kind": {
+                    "type": "string",
+                    "enum": ["person", "group", "non_person", "unclear"],
+                },
+                "evidence_basis": {
+                    "type": "string",
+                    "enum": [
+                        "explicit_attribution", "speaker_action", "quote_type",
+                        "alternation", "inference", "unknown",
+                    ],
+                },
+                "confidence": {
+                    "type": "string",
+                    "enum": ["high", "medium", "low"],
+                },
+                "citations": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                },
+                "reason": {"type": "string"},
+            },
+        },
+    },
+}
 
 
 NON_PERSON_LABEL = "非人物发声"
@@ -1910,12 +2005,23 @@ class ShortMemAgent:
     def __init__(self, max_rounds=20):
         self.max_rounds = max_rounds
         self.history = []  # [(line_num, dialogue_text, speaker, reason, narrative_before)]
+        self.confirmed_keys = set()
         self.phase_violation = False  # set by Boss when model contradicts alternating pattern
 
-    def update(self, line_num, dialogue_text, speaker, reason="", narrative_before=""):
+    def update(self, line_num, dialogue_text, speaker, reason="", narrative_before="", confirmed=True):
         self.history.append((line_num, dialogue_text, speaker, reason, narrative_before))
+        key = (line_num, dialogue_text)
+        if confirmed:
+            self.confirmed_keys.add(key)
         if len(self.history) > self.max_rounds:
-            self.history.pop(0)
+            removed = self.history.pop(0)
+            self.confirmed_keys.discard((removed[0], removed[1]))
+
+    def _confirmed_history(self):
+        return [
+            entry for entry in self.history
+            if (entry[0], entry[1]) in self.confirmed_keys
+        ]
 
     def _rhythm_speaker(self, speaker):
         cleaned = validate_char_name(speaker)
@@ -1940,9 +2046,10 @@ class ShortMemAgent:
 
     def _get_exchange_rhythm(self):
         """Detect rapid 2-person exchange pattern and return (text, next_expected)."""
-        if len(self.history) < 4:
+        confirmed = self._confirmed_history()
+        if len(confirmed) < 4:
             return None, None
-        recent = self.history[-8:]  # last 8 rounds max
+        recent = confirmed[-8:]  # last 8 confirmed anchors max
         speakers = [self._rhythm_speaker(sp) for _, _, sp, _, _ in recent]
         speakers = [sp for sp in speakers if sp]
 
@@ -1983,16 +2090,19 @@ class ShortMemAgent:
         return None, None
 
     def get_next_expected(self):
-        """Get the expected next speaker based on alternating pattern, or None."""
+        """Get a weak expectation from confirmed anchors only, or None."""
         _, next_exp = self._get_exchange_rhythm()
-        if next_exp:
-            return next_exp
-        # Short-window fallback: just look at the last two concrete named speakers.
-        if len(self.history) >= 2:
-            last_two = [self._rhythm_speaker(entry[2]) for entry in self.history[-2:]]
-            if last_two[0] and last_two[1] and last_two[0] != last_two[1]:
-                return last_two[0]
-        return None
+        return next_exp
+
+    def get_confirmed_summary(self):
+        """Return only independently confirmed anchors for quality-mode agents."""
+        confirmed = self._confirmed_history()
+        if not confirmed:
+            return "(No confirmed dialogue anchors yet)"
+        lines = ["[Confirmed dialogue anchors]"]
+        for line_num, dialogue, speaker, _, _ in confirmed[-8:]:
+            lines.append(f"  L{line_num}「{dialogue[:50]}」-> {speaker}")
+        return "\n".join(lines)
 
     def get_recent_speakers_hint(self):
         """Compact speaker-order hint for the Labeler."""
@@ -2766,15 +2876,418 @@ Output exactly:
 
 
 # ============================================================
+# Quality Ensemble - blind, block-level attribution
+# ============================================================
+
+class QualityEnsemble:
+    """Run independent raw-text reviews before selecting a speaker.
+
+    It deliberately accepts no provisional speaker history. Every agent receives
+    the same bounded, line-numbered raw packet and makes a novel-agnostic claim.
+    """
+
+    def __init__(self, dialogue_radius=None):
+        radius = DIALOGUE_BLOCK_RADIUS if dialogue_radius is None else dialogue_radius
+        self.dialogue_radius = max(1, int(radius))
+        self.model_call_count = 0
+
+    def _run_agent(self, agent_name, role, system_prompt, user_content, round_log, required_tags=()):
+        if required_tags:
+            user_content += (
+                "\n\nFORMAT REQUIREMENT: Call submit_review with the required structured fields. "
+                "Do not write analysis before the tool call. Required fields: "
+                + ", ".join(required_tags)
+            )
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ]
+        output_tool = self._quality_output_tool(required_tags)
+        model_text, pec, ec, tool_calls = call_ollama(
+            messages,
+            tools=[output_tool],
+            label=agent_name,
+            request_timeout=QUALITY_REQUEST_TIMEOUT,
+            tool_choice={"type": "function", "function": {"name": "submit_review"}},
+        )
+        self.model_call_count += 1
+        tool_args = self._extract_quality_tool_args(tool_calls)
+        log_agent(
+            round_log,
+            agent_name,
+            role,
+            messages,
+            model_text,
+            pec,
+            ec,
+            tool_calls_list=[{"function": "submit_review", "arguments": tool_args}] if tool_args else None,
+        )
+        if tool_args:
+            return self._tool_args_to_tag_text(tool_args), pec, ec
+
+        if required_tags:
+            repair_messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a strict structured-output formatter. Extract one final conclusion from "
+                        "the analyst response below. Call submit_review only. Do not invent evidence."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"Required fields: {', '.join(required_tags)}\n\n"
+                        f"Analyst response:\n{compact_text(model_text, 9000, keep='tail')}"
+                    ),
+                },
+            ]
+            repaired_text, repair_pec, repair_ec, repair_tool_calls = call_ollama(
+                repair_messages,
+                tools=[output_tool],
+                label=f"{agent_name}FormatRepair",
+                request_timeout=QUALITY_REQUEST_TIMEOUT,
+                tool_choice={"type": "function", "function": {"name": "submit_review"}},
+            )
+            self.model_call_count += 1
+            repaired_args = self._extract_quality_tool_args(repair_tool_calls)
+            log_agent(
+                round_log,
+                f"{agent_name}FormatRepair",
+                "structured_output_repair",
+                repair_messages,
+                repaired_text,
+                repair_pec,
+                repair_ec,
+                tool_calls_list=[{"function": "submit_review", "arguments": repaired_args}] if repaired_args else None,
+            )
+            if repaired_args:
+                return self._tool_args_to_tag_text(repaired_args), pec + repair_pec, ec + repair_ec
+            return repaired_text, pec + repair_pec, ec + repair_ec
+        return model_text, pec, ec
+
+    @staticmethod
+    def _quality_output_tool(required_tags):
+        tool = json.loads(json.dumps(QUALITY_OUTPUT_TOOL))
+        tool["function"]["parameters"]["required"] = list(required_tags)
+        return tool
+
+    @staticmethod
+    def _extract_quality_tool_args(tool_calls):
+        for tool_call in tool_calls or []:
+            function = tool_call.get("function", {}) or {}
+            if function.get("name") != "submit_review":
+                continue
+            args, parse_error = parse_tool_arguments("submit_review", function.get("arguments", "{}"))
+            if not parse_error or args:
+                return args
+        return {}
+
+    @staticmethod
+    def _tool_args_to_tag_text(args):
+        fields = (
+            "speaker", "target_speaker", "preferred_speaker", "block_assignments",
+            "quote_type", "voice_kind", "evidence_basis", "confidence", "reason",
+        )
+        rendered = []
+        for field in fields:
+            value = args.get(field)
+            if value is not None and str(value).strip():
+                rendered.append(f"<{field}>{value}</{field}>")
+        citations = args.get("citations") or []
+        if isinstance(citations, (str, int)):
+            citations = [citations]
+        citation_text = ", ".join(f"L{item}" for item in citations)
+        if citation_text:
+            rendered.append(f"<citations>{citation_text}</citations>")
+        return "\n".join(rendered)
+
+    def _parse_card(self, text, speaker_tags=("speaker",)):
+        raw_speaker = ""
+        for tag in speaker_tags:
+            raw_speaker = get_ensemble_tag(text, tag)
+            if raw_speaker:
+                break
+        speaker = validate_char_name(raw_speaker) if raw_speaker else ""
+        if not speaker and raw_speaker.strip() == "?":
+            speaker = "?"
+        citations_text = get_ensemble_tag(text, "citations")
+        return {
+            "speaker": speaker,
+            "quote_type": get_ensemble_tag(text, "quote_type", "unclear").strip().lower(),
+            "voice_kind": get_ensemble_tag(text, "voice_kind", "unclear").strip().lower(),
+            "evidence_basis": get_ensemble_tag(text, "evidence_basis", "unknown").strip().lower(),
+            "confidence": get_ensemble_tag(text, "confidence", "low").strip().lower(),
+            "citations": parse_line_citations(citations_text),
+            "reason": get_ensemble_tag(text, "reason")[:500],
+            "raw": text,
+        }
+
+    @staticmethod
+    def _same_speaker(left, right):
+        return bool(left and right and (left == right or left in right or right in left))
+
+    @staticmethod
+    def _confidence_is_high(value):
+        return (value or "").strip().lower() in {"high", "certain"}
+
+    def _card_has_local_citation(self, card, packet):
+        return citations_are_local(card.get("citations", []), packet)
+
+    def _select_decision(self, quote_card, local_card, block_card, arbiter_card, packet):
+        local_speaker = local_card.get("speaker", "")
+        block_speaker = block_card.get("speaker", "")
+        consensus = local_speaker if self._same_speaker(local_speaker, block_speaker) else ""
+        consensus_cited = bool(
+            consensus
+            and self._card_has_local_citation(local_card, packet)
+            and self._card_has_local_citation(block_card, packet)
+        )
+        arbiter_speaker = arbiter_card.get("speaker", "")
+        arbiter_cited = self._card_has_local_citation(arbiter_card, packet)
+        arbiter_strong = (
+            arbiter_cited
+            and self._confidence_is_high(arbiter_card.get("confidence"))
+            and arbiter_card.get("evidence_basis") in {"explicit_attribution", "quote_type"}
+        )
+
+        source = "arbiter"
+        if consensus and not arbiter_speaker:
+            speaker = consensus
+            source = "blind-consensus-no-arbiter-answer"
+        elif consensus and not self._same_speaker(consensus, arbiter_speaker) and not arbiter_strong:
+            speaker = consensus
+            source = "blind-consensus-over-weak-arbiter"
+        elif arbiter_speaker:
+            speaker = arbiter_speaker
+        elif consensus:
+            speaker = consensus
+            source = "blind-consensus"
+        elif local_speaker:
+            speaker = local_speaker
+            source = "local-fallback"
+        elif block_speaker:
+            speaker = block_speaker
+            source = "block-fallback"
+        elif quote_card.get("voice_kind") == "non_person":
+            speaker = NON_PERSON_LABEL
+            source = "quote-type-fallback"
+        else:
+            speaker = "?"
+            source = "unresolved"
+
+        if speaker == NON_PERSON_LABEL and quote_card.get("voice_kind") not in {"non_person", "unclear"}:
+            if consensus and consensus != NON_PERSON_LABEL:
+                speaker = consensus
+                source = "blind-consensus-over-unverified-non-person"
+
+        final_basis = arbiter_card.get("evidence_basis", "unknown")
+        final_confidence = arbiter_card.get("confidence", "low")
+        final_quote_type = arbiter_card.get("quote_type", "unclear")
+        if source.startswith("blind-consensus"):
+            final_basis = "blind_consensus"
+            final_confidence = "high" if consensus_cited else "medium"
+            final_quote_type = quote_card.get("quote_type") or block_card.get("quote_type") or "unclear"
+
+        confirmed_anchor = bool(
+            arbiter_cited
+            and self._confidence_is_high(final_confidence)
+            and final_basis in {"explicit_attribution", "quote_type"}
+        )
+        if consensus_cited and self._same_speaker(speaker, consensus):
+            confirmed_anchor = True
+
+        citations = arbiter_card.get("citations", [])
+        if not citations and consensus_cited:
+            citations = sorted(set(local_card.get("citations", []) + block_card.get("citations", [])))
+        return {
+            "speaker": speaker,
+            "quote_type": final_quote_type,
+            "evidence_basis": final_basis,
+            "confidence": final_confidence,
+            "citations": citations,
+            "confirmed_anchor": confirmed_anchor,
+            "selection_source": source,
+            "blind_agreement": bool(consensus),
+        }
+
+    def decide(self, novel_lines, dialogue_list, line_num, dialogue, confirmed_anchors, round_log):
+        """Return a quality-mode decision without consuming provisional labels."""
+        calls_before = self.model_call_count
+        packet = build_dialogue_packet(
+            novel_lines,
+            dialogue_list,
+            line_num,
+            dialogue,
+            dialogue_radius=self.dialogue_radius,
+        )
+        packet_text = format_dialogue_packet(packet)
+        anchor_text = compact_text(confirmed_anchors, 2500, keep="tail")
+
+        quote_system = (
+            "You classify the TARGET quoted span in a raw Chinese novel packet. "
+            "Do not identify a nearby character. Decide whether it is actual person speech, "
+            "group speech, narration/thought, embedded text, or sound/text. Cite only original "
+            "packet lines using L<number>. Call submit_review with quote_type, voice_kind, confidence, "
+            "citations, and a brief raw-text reason."
+        )
+        quote_text, quote_pec, quote_ec = self._run_agent(
+            "QuoteTypeAgent", "quote_type", quote_system,
+            f"Classify only the target quote. Prior annotations are absent.\n\n{packet_text}",
+            round_log,
+            required_tags=("quote_type", "voice_kind", "confidence", "citations"),
+        )
+        quote_card = self._parse_card(quote_text)
+
+        local_system = (
+            "You are a blind local speaker-attribution reviewer for a Chinese novel. Use only the raw "
+            "evidence packet. Identify the TARGET speaker, not a mentioned person and not the speaker "
+            "of an adjacent quote. A speech verb is strong only when it grammatically binds to the TARGET. "
+            "Check both before-quote and after-quote attribution. Alternation is a last tie-breaker. "
+            "An immediate narrative gesture that demonstrates a referent in the target quote can support the "
+            "preceding quote; a later generic reaction cannot. "
+            "Do not use outside knowledge, character stereotypes, name meanings, or the topic of a line as evidence. "
+            "If the neighboring turns have raw-text anchors, test whether the target is the intervening reply instead "
+            "of copying a nearby speaker. "
+            "Do not use prior labels. Call submit_review with speaker, quote_type, evidence_basis, confidence, "
+            "citations, and a brief target-bound reason."
+        )
+        local_text, local_pec, local_ec = self._run_agent(
+            "LocalAttributor", "blind_local_attribution", local_system,
+            f"Find the TARGET speaker independently.\n\n{packet_text}\n\n[Confirmed anchors only]\n{anchor_text}",
+            round_log,
+            required_tags=("speaker", "quote_type", "evidence_basis", "confidence", "citations"),
+        )
+        local_card = self._parse_card(local_text)
+
+        block_system = (
+            "You are a blind dialogue-block solver for a Chinese novel. Read the full local block and "
+            "assign speakers jointly before deciding the TARGET. Use raw narrative anchors on either side. "
+            "Treat an immediate demonstrative action after a quote as possible attribution for that quote, "
+            "not as evidence for an earlier adjacent turn. "
+            "Narrative can reset alternation and one character may speak consecutively. Do not inherit "
+            "outside character knowledge or select a speaker only because the topic sounds characteristic. First find "
+            "which turns are locally anchored; when the turns on both sides are anchored to one speaker, explicitly "
+            "test the target as the intervening reply. "
+            "previous labels or invent names. Call submit_review with block_assignments, target_speaker, quote_type, "
+            "evidence_basis, confidence, citations, and a brief target-bound reason."
+        )
+        block_text, block_pec, block_ec = self._run_agent(
+            "BlockSolver", "blind_block_attribution", block_system,
+            f"Solve the dialogue block jointly. The target is marked.\n\n{packet_text}\n\n[Confirmed anchors only]\n{anchor_text}",
+            round_log,
+            required_tags=("block_assignments", "target_speaker", "quote_type", "evidence_basis", "confidence", "citations"),
+        )
+        block_card = self._parse_card(block_text, speaker_tags=("target_speaker", "speaker"))
+        block_card["assignments"] = get_ensemble_tag(block_text, "block_assignments")[:1000]
+
+        candidate_cards = {
+            "quote_type_review": {
+                key: quote_card[key]
+                for key in ("quote_type", "voice_kind", "confidence", "citations", "reason")
+            },
+            "local_attribution_review": {
+                key: local_card[key]
+                for key in ("speaker", "quote_type", "evidence_basis", "confidence", "citations", "reason")
+            },
+            "block_attribution_review": {
+                key: block_card[key]
+                for key in ("speaker", "quote_type", "evidence_basis", "confidence", "citations", "reason", "assignments")
+            },
+        }
+        counterfactual_system = (
+            "You are an adversarial evidence reviewer for dialogue attribution. The raw packet is authoritative. "
+            "Inspect the anonymous candidate claims and try to falsify them: an attribution verb may belong to "
+            "a neighboring quote, a named person may be only the addressee, or the target may not be actual speech. "
+            "Choose the most defensible target speaker only after checking the exact raw lines. Do not apply any "
+            "outside character knowledge or decide from topic/persona alone. Challenge a shared candidate conclusion "
+            "when the local turn sequence and post-quote narrative point elsewhere. "
+            "novel-specific rule. Call submit_review with preferred_speaker, evidence_basis, confidence, citations, "
+            "and a reason stating which candidate evidence survives or fails."
+        )
+        counterfactual_text, counterfactual_pec, counterfactual_ec = self._run_agent(
+            "CounterfactualReviewer", "candidate_refutation", counterfactual_system,
+            f"Challenge the candidate claims against the raw target evidence.\n\n{packet_text}\n\n"
+            f"[Anonymous candidate cards]\n{json.dumps(candidate_cards, ensure_ascii=False, indent=2)}",
+            round_log,
+            required_tags=("preferred_speaker", "evidence_basis", "confidence", "citations"),
+        )
+        counterfactual_card = self._parse_card(
+            counterfactual_text,
+            speaker_tags=("preferred_speaker", "speaker"),
+        )
+
+        anonymous_cards = {
+            **candidate_cards,
+            "counterfactual_review": {
+                key: counterfactual_card[key]
+                for key in ("speaker", "evidence_basis", "confidence", "citations", "reason")
+            },
+        }
+        arbiter_system = (
+            "You are a citation-based adjudicator for dialogue speaker annotation. The raw packet is "
+            "authoritative; anonymous reviews are hypotheses. Reject an attribution if it belongs to a "
+            "different quote. Prefer direct quote-bound evidence and use dialogue flow only as a tie-breaker. "
+            "Consider an immediate demonstrative action after a quote when it clearly continues that quote's referent. "
+            "Do not rely on outside character knowledge, a name's presumed speech style, or the semantic topic alone. "
+            "When both neighboring turns have local anchors, evaluate the target as a distinct intervening turn. "
+            "Do not use novel-specific rules. Call submit_review with speaker, quote_type, evidence_basis, confidence, "
+            "citations, and a brief target-bound reason."
+        )
+        arbiter_text, arbiter_pec, arbiter_ec = self._run_agent(
+            "CitationArbiter", "citation_arbitration", arbiter_system,
+            f"Adjudicate the TARGET speaker from raw text. Do not trust unsupported claims.\n\n{packet_text}\n\n"
+            f"[Anonymous review cards]\n{json.dumps(anonymous_cards, ensure_ascii=False, indent=2)}",
+            round_log,
+            required_tags=("speaker", "quote_type", "evidence_basis", "confidence", "citations"),
+        )
+        arbiter_card = self._parse_card(arbiter_text)
+
+        decision = self._select_decision(quote_card, local_card, block_card, arbiter_card, packet)
+        reason = (
+            f"quality_ensemble={decision['selection_source']}; "
+            f"citations={','.join(f'L{line}' for line in decision['citations']) or 'none'}; "
+            f"arbiter={arbiter_card.get('reason') or 'no reason'}"
+        )[:800]
+        metadata = {
+            "decision": decision,
+            "packet": {
+                "raw_start": packet["raw_start"],
+                "raw_end": packet["raw_end"],
+                "target_dialogue_index": packet["target"]["dialogue_index"],
+                "turn_count": len(packet["turns"]),
+            },
+            "reviews": {
+                "quote_type": {key: value for key, value in quote_card.items() if key != "raw"},
+                "local": {key: value for key, value in local_card.items() if key != "raw"},
+                "block": {key: value for key, value in block_card.items() if key != "raw"},
+                "counterfactual": {key: value for key, value in counterfactual_card.items() if key != "raw"},
+                "arbiter": {key: value for key, value in arbiter_card.items() if key != "raw"},
+            },
+            "model_calls": self.model_call_count - calls_before,
+        }
+        total_pec = quote_pec + local_pec + block_pec + counterfactual_pec + arbiter_pec
+        total_ec = quote_ec + local_ec + block_ec + counterfactual_ec + arbiter_ec
+        summary = f"{decision['speaker']} | {dialogue[:80]}"
+        return decision["speaker"], summary, reason, total_pec, total_ec, metadata
+
+
+# ============================================================
 # Boss (Python orchestrator)
 # ============================================================
 
 class Boss:
-    def __init__(self, short_mem_rounds=20):
+    def __init__(self, short_mem_rounds=20, decision_mode=None):
+        self.decision_mode = (decision_mode or DECISION_MODE or "ensemble").strip().lower()
+        if self.decision_mode not in {"ensemble", "legacy"}:
+            raise ValueError(f"Unsupported decision mode: {self.decision_mode}")
         self.labeler = LabelerAgent()
         self.verifier = VerifierAgent()
         self.short_mem = ShortMemAgent(max_rounds=short_mem_rounds)
         self.dialogue_list = get_dialogue_list()
+        with open(NOVEL_PATH, "r", encoding="utf-8") as f:
+            self.novel_lines = f.readlines()
+        self.ensemble = QualityEnsemble()
         self.total_tokens = 0
         self.round_count = 0
         self.search_agent_triggers = 0
@@ -3114,24 +3627,53 @@ class Boss:
             local_evidence_len=len(local_evidence_hint or ""),
         )
 
-        # 5. Call Labeler (READ-ONLY, no state writing)
-        speaker, summary, reason_text, pec, ec, tool_rounds_used = self.labeler.label(
-            line_num, dialogue, short_mem_text, "",
-            evidence_text, navigation_text, "",
-            round_log, quiet=quiet, override_force_tool=True,
-            recent_speakers_hint=recent_speakers_hint,
-            structure_hint=structure_hint,
-            local_evidence_hint=local_evidence_hint,
-        )
+        # 5. Decide from raw text. Quality mode keeps blind reviewers separate
+        # from provisional memory; legacy mode remains available for comparison.
+        ensemble_metadata = None
+        confirmed_anchor = False
+        if self.decision_mode == "ensemble":
+            speaker, summary, reason_text, pec, ec, ensemble_metadata = self.ensemble.decide(
+                self.novel_lines,
+                self.dialogue_list,
+                line_num,
+                dialogue,
+                self.short_mem.get_confirmed_summary(),
+                round_log,
+            )
+            decision = ensemble_metadata["decision"]
+            confirmed_anchor = bool(decision.get("confirmed_anchor"))
+            tool_rounds_used = 0
+            round_log["quality_ensemble"] = ensemble_metadata
+            round_log["labeler_evidence"] = {
+                "quote_type": decision.get("quote_type", "unclear"),
+                "evidence_basis": decision.get("evidence_basis", "unknown"),
+                "confidence": decision.get("confidence", "low"),
+            }
+            if not quiet:
+                self._safe_print(
+                    f"  Quality ensemble: {speaker} "
+                    f"(source={decision.get('selection_source')}, anchor={confirmed_anchor})"
+                )
+        else:
+            speaker, summary, reason_text, pec, ec, tool_rounds_used = self.labeler.label(
+                line_num, dialogue, short_mem_text, "",
+                evidence_text, navigation_text, "",
+                round_log, quiet=quiet, override_force_tool=True,
+                recent_speakers_hint=recent_speakers_hint,
+                structure_hint=structure_hint,
+                local_evidence_hint=local_evidence_hint,
+            )
+            confirmed_anchor = True
+            if not quiet:
+                self._safe_print(f"  Labeler: {speaker} (tools={tool_rounds_used})")
         self.total_tokens += pec + ec
+        round_log["annotation_tokens"] = pec + ec
 
-        if not quiet:
-            self._safe_print(f"  Labeler: {speaker} (tools={tool_rounds_used})")
-
-        # 5b. Phase anchor check: did Labeler violate the alternating pattern?
+        # 5b. Phase hints are legacy-only. Quality mode never lets an
+        # unconfirmed output steer the next raw-text decision.
         corrected = False
-        next_exp = self.short_mem.get_next_expected()
-        if next_exp and speaker != next_exp:
+        next_exp = self.short_mem.get_next_expected() if self.decision_mode == "legacy" else None
+        if self.decision_mode == "legacy" and next_exp and speaker != next_exp:
             self.short_mem.phase_violation = True
             if not quiet:
                 self._safe_print(f"  Phase violation: expected {next_exp}, got {speaker}")
@@ -3168,6 +3710,7 @@ class Boss:
                     old_speaker = speaker
                     speaker = character
                     corrected = True
+                    confirmed_anchor = True
                     self.corrections += 1
                     if not quiet:
                         self._safe_print(f"  Corrected: '{old_speaker}' -> '{character}'")
@@ -3193,15 +3736,17 @@ class Boss:
         if not speaker:
             speaker = "?"
 
-        # 8b. Generic risk review. This deliberately avoids novel-specific
-        # names or organizations; it only checks ambiguity patterns that occur
-        # across novels.
-        risk_reasons = self._risk_reasons(
-            speaker, dialogue, tool_rounds_used, next_exp,
-            local_structure=local_structure,
-            local_evidence=local_evidence,
-            labeler_evidence=round_log.get("labeler_evidence", {}),
-        )
+        # 8b. Legacy risk review. Quality mode already used independent blind
+        # reviews and a citation arbiter, so reintroducing the selected label as
+        # a verifier anchor would be counterproductive.
+        risk_reasons = []
+        if self.decision_mode == "legacy":
+            risk_reasons = self._risk_reasons(
+                speaker, dialogue, tool_rounds_used, next_exp,
+                local_structure=local_structure,
+                local_evidence=local_evidence,
+                labeler_evidence=round_log.get("labeler_evidence", {}),
+            )
         if risk_reasons:
             if not quiet:
                 self._safe_print(f"  Risk review: {', '.join(risk_reasons)}")
@@ -3251,7 +3796,14 @@ class Boss:
 
         # 10. Update ShortMem with narrative context
         narr_before = get_narrative_before(line_num)
-        self.short_mem.update(line_num, dialogue, speaker, reason_text, narrative_before=narr_before)
+        self.short_mem.update(
+            line_num,
+            dialogue,
+            speaker,
+            reason_text,
+            narrative_before=narr_before,
+            confirmed=confirmed_anchor,
+        )
 
         # 11. Save vault periodically
         if self.round_count % 50 == 0:
@@ -3262,7 +3814,11 @@ class Boss:
             "summary": summary,
             "reason": reason_text,
             "corrected": corrected,
+            "decision_mode": self.decision_mode,
+            "confirmed_anchor": confirmed_anchor,
         }
+        if ensemble_metadata is not None:
+            ensemble_metadata["final_speaker"] = speaker
 
         return speaker
 
@@ -3420,10 +3976,17 @@ def _writeline(msg):
 
 def main():
     global API_MODEL_FILTER, API_MODEL_PRIORITY, MODEL_PROVIDER, API_RETRIES, API_RETRY_DELAY
+    global DECISION_MODE, DIALOGUE_BLOCK_RADIUS, QUALITY_REQUEST_TIMEOUT
     parser = argparse.ArgumentParser(description="Multi-agent novel dialogue speaker annotation v4")
     parser.add_argument("--start", type=int, default=0, help="Start from dialogue index (0=resume)")
     parser.add_argument("--count", type=int, default=1, help="Number of dialogues to annotate")
     parser.add_argument("--short-mem", type=int, default=20, help="Short-term memory rounds")
+    parser.add_argument("--decision-mode", choices=["ensemble", "legacy"], default=DECISION_MODE,
+                        help="Annotation decision path: blind block-level ensemble (default) or legacy pipeline")
+    parser.add_argument("--dialogue-block-radius", type=int, default=DIALOGUE_BLOCK_RADIUS,
+                        help="Neighboring dialogue turns on each side for quality-mode block review")
+    parser.add_argument("--quality-request-timeout", type=int, default=QUALITY_REQUEST_TIMEOUT,
+                        help="Seconds before one quality-review API call fails over to another model")
     parser.add_argument("--validate", action="store_true", help="Run validation after annotation")
     parser.add_argument("--error-limit", type=int, default=_env_int("NOVEL_VALIDATE_ERROR_LIMIT", 30),
                         help="Validation error rows to print; 0 means all")
@@ -3470,6 +4033,9 @@ def main():
     API_MODEL_PRIORITY = [item.strip() for item in args.api_priority.split(",") if item.strip()]
     API_RETRIES = max(1, args.api_retries)
     API_RETRY_DELAY = max(0.0, args.api_retry_delay)
+    DECISION_MODE = args.decision_mode
+    DIALOGUE_BLOCK_RADIUS = max(1, args.dialogue_block_radius)
+    QUALITY_REQUEST_TIMEOUT = max(1, args.quality_request_timeout)
 
     print("=" * 60)
     print("  Multi-agent Novel Dialogue Speaker Annotation v4")
@@ -3491,6 +4057,10 @@ def main():
         print(f"  API retries: {API_RETRIES} (base delay {API_RETRY_DELAY:g}s)")
         print(f"  API health check: {args.health_check}")
     print(f"  Short-term memory: {args.short_mem} rounds")
+    print(f"  Decision mode: {DECISION_MODE}")
+    if DECISION_MODE == "ensemble":
+        print(f"  Dialogue block radius: {DIALOGUE_BLOCK_RADIUS} turns per side")
+        print(f"  Quality request timeout: {QUALITY_REQUEST_TIMEOUT}s")
     print(f"  Token budget: {TOKEN_BUDGET}")
     print(f"  Max tool rounds: {MAX_TOOL_ROUNDS}")
 
@@ -3569,10 +4139,11 @@ def main():
     total_rounds = end_idx - start_idx
     quiet_mode = total_rounds > 20
 
-    boss = Boss(short_mem_rounds=args.short_mem)
+    boss = Boss(short_mem_rounds=args.short_mem, decision_mode=DECISION_MODE)
 
     batch_tool_calls = 0
     batch_tokens = 0
+    batch_model_calls = 0
 
     for idx in range(start_idx, end_idx):
         line_num, dialogue = dialogues[idx]
@@ -3617,7 +4188,8 @@ def main():
 
         batch_tool_calls += len(round_log.get("tool_calls", []))
         labeler = round_log.get("agents", {}).get("Labeler", {})
-        batch_tokens += labeler.get("total_tokens", 0)
+        batch_tokens += round_log.get("annotation_tokens", labeler.get("total_tokens", 0))
+        batch_model_calls += round_log.get("quality_ensemble", {}).get("model_calls", 0)
 
         done = idx - start_idx + 1
         elapsed = time.time() - start_time
@@ -3629,11 +4201,11 @@ def main():
             avg_sec = elapsed / done
             remaining_sec = avg_sec * (total_rounds - done)
             _writeline(f"  [{done}/{total_rounds}] L{line_num} -> {speaker:<8s} | "
-                       f"tools={batch_tool_calls:>3d} avg={avg_sec:.0f}s "
+                       f"calls={batch_model_calls:>3d} tools={batch_tool_calls:>3d} avg={avg_sec:.0f}s "
                        f"elapsed={fmt_duration(elapsed)} remaining={fmt_duration(remaining_sec)}")
         else:
             _writeline(f"  [{done}/{total_rounds}] L{line_num} -> {speaker:<8s} | "
-                       f"tools={batch_tool_calls:>3d} avg={avg_sec:.0f}s "
+                       f"calls={batch_model_calls:>3d} tools={batch_tool_calls:>3d} avg={avg_sec:.0f}s "
                        f"elapsed={fmt_duration(elapsed)} remaining={fmt_duration(remaining_sec)}")
 
     if quiet_mode:
@@ -3642,6 +4214,7 @@ def main():
     _writeline(f"\n{'='*60}")
     _writeline(f"  Annotation complete")
     _writeline(f"  Dialogues annotated: {end_idx - start_idx}")
+    _writeline(f"  Quality ensemble model calls: {boss.ensemble.model_call_count}")
     _writeline(f"  Tool calls: {boss.labeler.tool_call_count}")
     _writeline(f"  SearchAgent triggers: {boss.search_agent_triggers}")
     _writeline(f"  Corrections: {boss.corrections}")
