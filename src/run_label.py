@@ -67,6 +67,7 @@ API_RETRIES = 3
 API_RETRY_DELAY = 5.0
 API_CALL_TRACE = []
 CURRENT_ROUND_TRACE = None
+API_ROUND_ROBIN_CURSOR = {}
 SENSENOVA_MODEL = "sensenova-6.7-flash-lite"
 SENSENOVA_KEYS_PATH = os.path.join(ROOT_DIR, "config", "other_sensenova_apikeys")
 
@@ -125,7 +126,8 @@ class ModelCallError(RuntimeError):
 
 class ApiModel:
     def __init__(self, name, model, base_url, api_key="", min_interval=1.5,
-                 tool_capable=True, display_model=None, use_env_proxy=True):
+                 tool_capable=True, display_model=None, use_env_proxy=True,
+                 round_robin_group=""):
         self.name = name
         self.model = model
         self.display_model = display_model or model
@@ -138,6 +140,7 @@ class ApiModel:
         self.cooldown_until = 0.0
         self.last_error = ""
         self.disabled = False
+        self.round_robin_group = round_robin_group
 
     @property
     def label(self):
@@ -288,6 +291,7 @@ def _append_sensenova_models(models):
                 tool_capable=True,
                 display_model=f"{SENSENOVA_MODEL}-{suffix}",
                 use_env_proxy=use_env_proxy,
+                round_robin_group="sense-nova",
             ))
         return
 
@@ -323,6 +327,31 @@ def _apply_api_priority(models):
         ranked.append((rank, original_index, model))
     ranked.sort(key=lambda item: (item[0], item[1]))
     return [model for _, _, model in ranked]
+
+
+def _api_model_iteration_order():
+    """Return API models with same-provider key pools rotated per request."""
+    if not API_MODELS:
+        return []
+
+    ordered = []
+    emitted_groups = set()
+    for model in API_MODELS:
+        group = model.round_robin_group
+        if not group:
+            ordered.append(model)
+            continue
+        if group in emitted_groups:
+            continue
+        emitted_groups.add(group)
+        group_models = [m for m in API_MODELS if m.round_robin_group == group]
+        if len(group_models) <= 1:
+            ordered.extend(group_models)
+            continue
+        cursor = API_ROUND_ROBIN_CURSOR.get(group, 0) % len(group_models)
+        API_ROUND_ROBIN_CURSOR[group] = (cursor + 1) % len(group_models)
+        ordered.extend(group_models[cursor:] + group_models[:cursor])
+    return ordered
 
 
 def _append_opencode_model(models, provider_name, model_name, min_interval=2.0):
@@ -505,8 +534,9 @@ def _health_check_model(model, needs_tools):
 
 
 def init_api_fallback(health_check="all"):
-    global API_MODELS
+    global API_MODELS, API_ROUND_ROBIN_CURSOR
     API_MODELS = _build_api_models()
+    API_ROUND_ROBIN_CURSOR = {}
     if not API_MODELS:
         raise ModelCallError("No API fallback models configured. Set ZHIPUAI_API_KEY or configure opencode providers.")
 
@@ -514,7 +544,8 @@ def init_api_fallback(health_check="all"):
         print("  API fallback health check: skipped")
         print("  API fallback order:")
         for model in API_MODELS:
-            print(f"    PEND {model.label} (lazy check on first use)")
+            rr = f" rr={model.round_robin_group}" if model.round_robin_group else ""
+            print(f"    PEND {model.label}{rr} (lazy check on first use)")
         return
 
     print("  API fallback health check:")
@@ -528,16 +559,19 @@ def init_api_fallback(health_check="all"):
             _health_check_model(model, needs_tools=needs_tools)
             if needs_tools:
                 usable.append(model)
-                print(f"    OK   {model.label} (chat + tools)")
+                rr = f" rr={model.round_robin_group}" if model.round_robin_group else ""
+                print(f"    OK   {model.label}{rr} (chat + tools)")
             else:
-                print(f"    CHAT {model.label} (chat only, skipped for tool rounds)")
+                rr = f" rr={model.round_robin_group}" if model.round_robin_group else ""
+                print(f"    CHAT {model.label}{rr} (chat only, skipped for tool rounds)")
         except Exception as exc:
             model.mark_failure(str(exc), cooldown=300)
             print(f"    FAIL {model.label} ({str(exc)[:100]})")
     if health_check == "first":
         for model in API_MODELS:
             if model.label not in checked:
-                print(f"    PEND {model.label} (lazy fallback)")
+                rr = f" rr={model.round_robin_group}" if model.round_robin_group else ""
+                print(f"    PEND {model.label}{rr} (lazy fallback)")
     if not usable and health_check == "all":
         raise ModelCallError("All tool-capable API fallback models failed health checks.")
 
@@ -648,6 +682,20 @@ def _should_retry_model_error(exc):
         "HTTP 504",
     )
     return any(marker in text for marker in retry_markers)
+
+
+def _cooldown_for_model_error(exc):
+    text = str(exc)
+    lowered = text.lower()
+    if any(marker in lowered for marker in ("http 401", "http 403", "invalid api key", "unauthorized", "forbidden")):
+        return 3600
+    if any(marker in lowered for marker in ("http 429", "rate limit", "too many requests", "quota", "insufficient")):
+        return 300
+    if isinstance(exc, (requests.exceptions.Timeout, requests.exceptions.ConnectionError)):
+        return 60
+    if any(marker in text for marker in ("HTTP 500", "HTTP 502", "HTTP 503", "HTTP 504")):
+        return 60
+    return 30
 
 
 def _sleep_before_retry(attempt):
@@ -761,7 +809,7 @@ def call_api_fallback(messages, tools=None, label=""):
     expects_tool = _expects_tool_call(messages, tools)
     errors = []
     max_attempts = max(1, int(API_RETRIES or 1))
-    for model in API_MODELS:
+    for model in _api_model_iteration_order():
         if not model.available(needs_tools):
             continue
         for attempt in range(1, max_attempts + 1):
@@ -775,6 +823,7 @@ def call_api_fallback(messages, tools=None, label=""):
                     provider=model.name,
                     model=model.model,
                     model_label=model.label,
+                    round_robin_group=model.round_robin_group,
                     tools_enabled=bool(tools),
                     expects_tool=expects_tool,
                     tool_choice=tool_choice,
@@ -799,6 +848,7 @@ def call_api_fallback(messages, tools=None, label=""):
                             provider=model.name,
                             model=model.model,
                             model_label=model.label,
+                            round_robin_group=model.round_robin_group,
                             attempt=attempt,
                             reason="synthesized required read_novel_lines call from target line",
                             tool_calls=len(tool_calls),
@@ -812,6 +862,7 @@ def call_api_fallback(messages, tools=None, label=""):
                         provider=model.name,
                         model=model.model,
                         model_label=model.label,
+                        round_robin_group=model.round_robin_group,
                         attempt=attempt,
                         max_attempts=max_attempts,
                         reason="expected tool call but model returned none",
@@ -827,6 +878,7 @@ def call_api_fallback(messages, tools=None, label=""):
                             provider=model.name,
                             model=model.model,
                             model_label=model.label,
+                            round_robin_group=model.round_robin_group,
                             attempt=attempt,
                             next_attempt=attempt + 1,
                             reason="no tool call",
@@ -841,6 +893,7 @@ def call_api_fallback(messages, tools=None, label=""):
                     provider=model.name,
                     model=model.model,
                     model_label=model.label,
+                    round_robin_group=model.round_robin_group,
                     tools_enabled=bool(tools),
                     tool_calls=len(tool_calls),
                     coerced_text_tool_call=coerced_tool_call,
@@ -856,6 +909,7 @@ def call_api_fallback(messages, tools=None, label=""):
                     "provider": model.name,
                     "model": model.model,
                     "model_label": model.label,
+                    "round_robin_group": model.round_robin_group,
                     "tools_enabled": bool(tools),
                     "tool_choice": tool_choice,
                     "tool_calls": len(tool_calls),
@@ -873,6 +927,7 @@ def call_api_fallback(messages, tools=None, label=""):
                     provider=model.name,
                     model=model.model,
                     model_label=model.label,
+                    round_robin_group=model.round_robin_group,
                     tools_enabled=bool(tools),
                     attempt=attempt,
                     max_attempts=max_attempts,
@@ -889,6 +944,7 @@ def call_api_fallback(messages, tools=None, label=""):
                         provider=model.name,
                         model=model.model,
                         model_label=model.label,
+                        round_robin_group=model.round_robin_group,
                         attempt=attempt,
                         next_attempt=attempt + 1,
                         reason=err,
@@ -896,6 +952,7 @@ def call_api_fallback(messages, tools=None, label=""):
                     _sleep_before_retry(attempt)
                     continue
                 errors.append(err)
+                model.mark_failure(err, cooldown=_cooldown_for_model_error(exc))
                 break
     detail = "; ".join(errors[-5:]) if errors else "no model available outside cooldown"
     temp_log_event(
@@ -915,9 +972,16 @@ TEMP_DESCRIPTORS = {
     "老者", "老妇人", "老翁", "对方", "陌生人", "路人", "来客", "访客",
     "男商人", "女商人", "年轻商人", "老商人", "中年商人", "旅行商人", "行商人", "商人",
     "兑换商", "皮草商", "店主", "老板", "酒吧老板", "店员", "服务生",
-    "女服务生", "男服务生", "红发女孩", "客人", "男客人", "女客人",
+    "女服务生", "男服务生", "红发女孩", "红发少女", "红发女子", "客人", "男客人", "女客人",
     "房客", "乞丐", "修女", "祭司", "旅人", "工匠", "磨粉匠", "摊贩",
     "摊贩老板", "车夫", "船夫", "守卫", "卫兵", "士兵", "神父",
+    "村民", "村人", "镇民", "居民", "市民", "群众", "众人", "人群", "一行人",
+    "来人", "那人", "这个人", "那个人", "同伴", "旅伴", "手下", "追兵", "部下",
+    "伙计", "职员", "员工", "成员", "商行员工", "商行成员", "商行同伴", "商行手下",
+    "中年男子", "中年女人", "中年女子", "年轻男子", "年轻女子", "年轻女孩",
+    "金发女孩", "黑发男子", "店老板", "店家", "老板娘", "女主人", "男主人", "主人",
+    "佣人", "仆人", "书记员", "官员", "军人", "骑士", "贵族", "领主", "代理人",
+    "船员", "水手", "牧羊人", "牧羊女", "教师", "学生", "医师", "医生",
 }
 
 # Forward search patterns for name reveal (must be actual name-introduction, not generic "I am X")
@@ -1451,6 +1515,145 @@ def validate_char_name(name):
     return name
 
 
+GENERIC_ROLE_SUFFIXES = (
+    "的人", "手下", "成员", "员工", "同伴", "部下", "追兵", "群众", "众人", "人群",
+    "男子", "女子", "女孩", "少年", "少女", "老人", "客人", "村民", "镇民", "居民",
+    "商人", "店主", "老板", "伙计", "职员", "佣人", "仆人", "士兵", "守卫", "卫兵",
+)
+SPEAKER_PRONOUNS = {
+    "我", "你", "他", "她", "它", "咱", "咱们", "我们", "你们", "他们", "她们",
+    "此人", "那人", "这人", "那个人", "这个人", "对方", "自己", "本人",
+}
+ATTRIBUTION_CLEAN_SPLITS = re.compile(r"[，,。！？；;：:\s]|(?:向|对|朝|冲|跟|和|给|把|被)")
+ATTRIBUTION_VERB_RE = re.compile(
+    r"(?P<speaker>[\u4e00-\u9fffA-Za-z0-9·•・]{1,15}(?:向|对|朝|冲|跟|和|给)?[\u4e00-\u9fffA-Za-z0-9·•・]{0,8})"
+    r"(?P<verb>说(?:道|着|完|了)?|问(?:道)?|回答|答道|喊(?:道)?|叫(?:道)?|开口|"
+    r"低语|嘀咕|喃喃|叹(?:道|息)?|笑(?:道)?|补充|继续说|表示|怒吼|大喊|小声说)"
+)
+QUOTE_TYPE_CAUTION_KEYWORDS = (
+    "写着", "刻着", "上面写", "牌子", "文字", "读作", "念作", "书上", "信上", "纸上",
+    "传来", "响起", "声音", "音效", "敲门声", "脚步声", "钟声",
+    "心想", "心里想", "心中", "脑中", "想着", "自言自语般", "仿佛", "似乎在说", "像是在说",
+)
+
+
+def is_generic_speaker_label(name):
+    """Return True for role/appearance/group labels that should not become canonical characters."""
+    cleaned = validate_char_name(name) or (name or "").strip()
+    if not cleaned or cleaned in {"?", NON_PERSON_LABEL}:
+        return False
+    if cleaned in TEMP_DESCRIPTORS:
+        return True
+    # A role followed by an apparent personal name should stay name-like.
+    for role in sorted(TEMP_DESCRIPTORS, key=len, reverse=True):
+        if cleaned.startswith(role) and len(cleaned) > len(role):
+            return False
+    if any(cleaned.endswith(suffix) for suffix in GENERIC_ROLE_SUFFIXES):
+        return True
+    return False
+
+
+def _clean_attribution_candidate(raw):
+    raw = (raw or "").strip(" 　，,。！？；;：:「」『』（）()[]【】")
+    if not raw:
+        return ""
+    parts = [p for p in ATTRIBUTION_CLEAN_SPLITS.split(raw) if p]
+    candidate = parts[0] if parts else raw
+    candidate = re.sub(r"^(于是|然后|接着|这时|那时|只见|而|但|可是|不过|同时)", "", candidate)
+    candidate = re.sub(r"(则|又|也|便|才|却|就|仍|仍然|继续)$", "", candidate)
+    candidate = candidate.strip(" 　，,。！？；;：:「」『』（）()[]【】")
+    if candidate in SPEAKER_PRONOUNS:
+        return ""
+    if not re.search(r"[\u4e00-\u9fffA-Za-z]", candidate):
+        return ""
+    return candidate[:15]
+
+
+def _extract_attribution_candidates(text):
+    candidates = []
+    for match in ATTRIBUTION_VERB_RE.finditer(text or ""):
+        candidate = _clean_attribution_candidate(match.group("speaker"))
+        if candidate:
+            candidates.append({"speaker": candidate, "verb": match.group("verb")})
+    # Handle quote-first forms: 「...」某人说道。
+    for tail in re.findall(r"」([^。！？；;]{0,30})", text or ""):
+        for match in ATTRIBUTION_VERB_RE.finditer(tail):
+            candidate = _clean_attribution_candidate(match.group("speaker"))
+            if candidate:
+                candidates.append({"speaker": candidate, "verb": match.group("verb")})
+    deduped = []
+    seen = set()
+    for item in candidates:
+        key = (item["speaker"], item["verb"])
+        if key not in seen:
+            seen.add(key)
+            deduped.append(item)
+    return deduped
+
+
+def analyze_local_evidence(line_num, dialogue, local_structure=None):
+    """Build deterministic local evidence hints without using answer labels."""
+    with open(NOVEL_PATH, "r", encoding="utf-8") as f:
+        novel_lines = [line.rstrip("\n") for line in f.readlines()]
+    if not (1 <= line_num <= len(novel_lines)):
+        return {"line_num": line_num, "target_line": "", "attribution_candidates": [], "quote_type_cautions": []}
+
+    start = max(1, line_num - 3)
+    end = min(len(novel_lines), line_num + 2)
+    local_items = []
+    candidates = []
+    for ln in range(start, end + 1):
+        text = novel_lines[ln - 1].strip()
+        local_items.append((ln, text))
+        for item in _extract_attribution_candidates(text):
+            item = dict(item)
+            item["line"] = ln
+            item["text"] = text[:120]
+            candidates.append(item)
+
+    target_line = novel_lines[line_num - 1].strip()
+    cautions = []
+    if target_line.count("「") > 1:
+        cautions.append("multiple quoted spans on the target line; verify which quoted text is the target")
+    if any(keyword in target_line for keyword in QUOTE_TYPE_CAUTION_KEYWORDS):
+        cautions.append("target line contains quote-type caution words; verify actual speech vs narration/sound/text")
+    if len((dialogue or "").strip()) <= 4 and re.search(r"[咚叮砰啪哗轰咕咔铃吱呀啊嗯唔呜嘿喂]", dialogue or ""):
+        cautions.append("very short sound-like fragment; verify whether it is human speech")
+
+    return {
+        "line_num": line_num,
+        "target_line": target_line,
+        "local_start": start,
+        "local_end": end,
+        "local_lines": local_items,
+        "attribution_candidates": candidates[:8],
+        "quote_type_cautions": cautions,
+        "narrative_between": (local_structure or {}).get("narrative_between", []),
+        "no_narrative_break_from_previous": bool((local_structure or {}).get("no_narrative_break_from_previous")),
+    }
+
+
+def format_local_evidence_hint(local_evidence):
+    lines = ["[Deterministic local evidence audit - no answer labels]"]
+    target_line = local_evidence.get("target_line") or ""
+    if target_line:
+        lines.append(f"  Target raw line: L{local_evidence.get('line_num')}: {target_line[:180]}")
+    candidates = local_evidence.get("attribution_candidates") or []
+    if candidates:
+        lines.append("  Local attribution candidates detected by regex; verify in raw text before using:")
+        for item in candidates[:5]:
+            lines.append(f"    L{item.get('line')}: {item.get('speaker')} + {item.get('verb')} | {item.get('text')[:90]}")
+    else:
+        lines.append("  Local attribution candidates detected by regex: none")
+    cautions = local_evidence.get("quote_type_cautions") or []
+    if cautions:
+        lines.append("  Quote-type cautions:")
+        for caution in cautions:
+            lines.append(f"    - {caution}")
+    lines.append("  Treat alternation as weak evidence. Do not override raw attribution or quote-type evidence with memory order.")
+    return "\n".join(lines)
+
+
 class CharacterState:
     """Clean character state with strict validation."""
 
@@ -1714,11 +1917,19 @@ class ShortMemAgent:
         if len(self.history) > self.max_rounds:
             self.history.pop(0)
 
+    def _rhythm_speaker(self, speaker):
+        cleaned = validate_char_name(speaker)
+        if not cleaned or cleaned in {NON_PERSON_LABEL, "?"}:
+            return None
+        if is_generic_speaker_label(cleaned):
+            return None
+        return cleaned
+
     def detect_rapid_exchange(self, min_length=3):
         """Detect if last N entries alternate between two speakers."""
         if len(self.history) < min_length:
             return False
-        recent = [entry[2] for entry in self.history[-min_length:]]
+        recent = [self._rhythm_speaker(entry[2]) for entry in self.history[-min_length:] if self._rhythm_speaker(entry[2])]
         unique = list(dict.fromkeys(recent))
         if len(unique) != 2:
             return False
@@ -1732,7 +1943,8 @@ class ShortMemAgent:
         if len(self.history) < 4:
             return None, None
         recent = self.history[-8:]  # last 8 rounds max
-        speakers = [sp for _, _, sp, _, _ in recent]
+        speakers = [self._rhythm_speaker(sp) for _, _, sp, _, _ in recent]
+        speakers = [sp for sp in speakers if sp]
 
         # Get the last two distinct speakers (in order of first appearance)
         seen = []
@@ -1775,13 +1987,11 @@ class ShortMemAgent:
         _, next_exp = self._get_exchange_rhythm()
         if next_exp:
             return next_exp
-        # Short-window fallback: just look at last 2
+        # Short-window fallback: just look at the last two concrete named speakers.
         if len(self.history) >= 2:
-            last_two = set(entry[2] for entry in self.history[-2:])
-            if len(last_two) == 2:
-                speakers = list(last_two)
-                last = self.history[-1][2]
-                return speakers[1] if speakers[0] == last else speakers[0]
+            last_two = [self._rhythm_speaker(entry[2]) for entry in self.history[-2:]]
+            if last_two[0] and last_two[1] and last_two[0] != last_two[1]:
+                return last_two[0]
         return None
 
     def get_recent_speakers_hint(self):
@@ -1800,7 +2010,7 @@ class ShortMemAgent:
             next_expected = self.get_next_expected()
             pair = f"{unique[0]} <-> {unique[1]}"
             if next_expected:
-                lines.append(f"  Possible two-person exchange: {pair}; next expected if no narrative break: {next_expected}")
+                lines.append(f"  Weak two-person exchange hint: {pair}; possible next speaker only if no narrative break and no attribution: {next_expected}")
             else:
                 lines.append(f"  Possible two-person exchange: {pair}")
         return "\n".join(lines)
@@ -1826,14 +2036,14 @@ class ShortMemAgent:
                 lines.append("")
                 lines.append(f"[ANCHOR CONSTRAINT] Last round violated the alternating pattern!")
                 lines.append(f"The last {min(len(self.history), 8)} rounds form {self._alternating_pair_name()}.")
-                lines.append(f"NEXT SPEAKER MUST BE: {next_exp} (strict alternation - do NOT repeat the previous speaker)")
-                lines.append("RULE: Only override this if the narrative clearly assigns speech to a different character.")
+                lines.append(f"Possible next speaker by weak alternation: {next_exp}")
+                lines.append("RULE: Use this only when local raw text has no narrative break and no attribution.")
 
         # Add rapid exchange warning
         if self.detect_rapid_exchange(4):
             lines.append("")
-            lines.append("RAPID EXCHANGE: Last 4 dialogues alternate between two speakers.")
-            lines.append("RULE: Narrative attribution (#1) before alternation (#3). Read 3-5 lines before target.")
+            lines.append("RAPID EXCHANGE: Last 4 concrete named dialogues alternate between two speakers.")
+            lines.append("RULE: Treat alternation as weak; narrative attribution and quote type come first.")
         return "\n".join(lines)
 
     def _alternating_pair_name(self):
@@ -1919,7 +2129,7 @@ class LabelerAgent:
 
     def label(self, line_num, dialogue, short_mem_text, fact_summary,
                char_state_text, navigation_text, scene_summary, round_log, quiet=False,
-               override_force_tool=True, recent_speakers_hint="", structure_hint=""):
+               override_force_tool=True, recent_speakers_hint="", structure_hint="", local_evidence_hint=""):
         """
         Label one dialogue's speaker. Returns (speaker, summary, reason, pec, ec).
         """
@@ -1951,12 +2161,11 @@ EVIDENCE HIERARCHY (Priority)
    - "XX回答那人说：" → XX is the speaker
    The line IMMEDIATELY before a 「dialogue」 is the most important.
 
-3. [MEDIUM] Alternating dialogue pattern
-   When two characters trade short lines in quick succession.
-   BUT: only trust the pattern when there is NO narrative paragraph between lines.
+3. [LOW] Alternating dialogue pattern
+   Useful only as a tie-breaker when two adjacent character speeches have no narrative break and no explicit attribution.
    A narrative paragraph between two lines BREAKS the alternating pattern.
 
-4. [LOW] Character availability / scene presence
+4. [LOWEST] Character availability / scene presence
    Just because a character was mentioned or recently active does NOT mean they are speaking.
 
 ========================================
@@ -2000,14 +2209,17 @@ RULE F: Non-person speech - ONLY for these cases
 - Collective shouting/group speech is NOT "非人物发声"
 
 RULE G: Alternating dialogue - specific rules
-- Two characters exchanging short lines (<20 chars each) → fast exchange likely
-- If there is NO narrative between two adjacent dialogues, the speaker likely alternates
-- But: if a narrative paragraph appears between two dialogues → the pattern RESETS
-- One character CAN speak multiple consecutive lines (not always alternating)
-- RULE: If immediate narrative contains a speech verb → that overrides ALL alternating patterns
-- RULE: If there is no speech verb AND no narrative between → use alternating + who-last-spoke
+- Alternation is WEAK evidence. It is useful only when there is no narrative break and no explicit attribution.
+- If a narrative paragraph appears between two dialogues → the pattern RESETS.
+- One character CAN speak multiple consecutive lines. Do not force alternation.
+- RULE: If immediate narrative contains a speech verb → that overrides ALL alternating patterns.
 - Use [Local dialogue structure] as a map: it tells you whether the previous dialogue is separated by narrative.
-- Use [Recent speaker order] only after checking local text; it is a clue, not proof.
+- Use [Recent speaker order] only after checking local text; it is a clue, not proof, and may contain earlier mistakes.
+
+RULE H: Report evidence strength honestly
+- evidence_basis=explicit_attribution only when local raw text directly attributes the target quote with a speech/thought verb.
+- evidence_basis=alternation only when you rely mainly on adjacent dialogue order; this is not high confidence unless raw text also supports it.
+- confidence=high only when a nearby line gives direct attribution, verified identity alias, or clear quote-type evidence.
 
 ========================================
 WORKFLOW
@@ -2030,7 +2242,7 @@ WORKFLOW
    Look for patterns such as "我叫XX", "我是XX", "名字是XX", "吾乃XX", or narration that says the descriptor is named XX.
    If found → use the revealed name. If not found → keep the stable descriptor.
 
-5. Output with <answer>, <reason>, <summary>. Optionally add <discovery> if you find new character info.
+5. Output with <answer>, <quote_type>, <evidence_basis>, <confidence>, <reason>, and <summary>. Optionally add <discovery> if you find new character info.
 
 ========================================
 OUTPUT FORMAT
@@ -2040,6 +2252,10 @@ OUTPUT FORMAT
 - One single speaker name, or "非人物发声"
 - Do NOT use "|" to separate multiple names
 - If unsure, use a descriptive label (what the novel calls them). This triggers an automated search.
+
+<quote_type>direct_speech|group_speech|embedded_quote|thought_or_narration|sound_or_text|unclear</quote_type>
+<evidence_basis>explicit_attribution|speaker_action|identity_alias|quote_type|alternation|inference|unknown</evidence_basis>
+<confidence>high|medium|low</confidence>
 
 <reason>your reasoning</reason>
 - In English or Chinese (both OK)
@@ -2071,6 +2287,8 @@ Short-term memory labels and character state are reference only.
 {navigation_text}
 
 {structure_hint}
+
+{local_evidence_hint}
 
 {short_mem_text}
 
@@ -2243,8 +2461,17 @@ If you think an auxiliary label is wrong, say so in <reason>.
         speaker = self._parse_answer(text)
         summary = self._parse_summary(text)
         reason = self._parse_reason(text)
+        round_log["labeler_evidence"] = {
+            "quote_type": self._parse_tag(text, "quote_type", "unclear"),
+            "evidence_basis": self._parse_tag(text, "evidence_basis", "unknown"),
+            "confidence": self._parse_tag(text, "confidence", "low"),
+        }
 
         return speaker, summary, reason, total_pec, total_ec, tool_rounds_used
+
+    def _parse_tag(self, text, tag, default=""):
+        match = re.search(rf"<{re.escape(tag)}>(.*?)</{re.escape(tag)}>", text or "", re.DOTALL)
+        return match.group(1).strip() if match else default
 
     def _is_garbage_speaker(self, speaker):
         """Check if a speaker name is clearly garbage (not a valid character name)."""
@@ -2319,7 +2546,7 @@ class VerifierAgent:
 
     def verify(self, line_num, dialogue, navigation_text, short_mem_text,
                scene_summary, char_state_text, labeler_speaker, round_log, quiet=False,
-               risk_reasons=None, structure_hint=""):
+               risk_reasons=None, structure_hint="", local_evidence_hint=""):
         """
         Independent verification. Returns (verdict, suggested_speaker, reason).
         verdict: "confirm" or "disagree"
@@ -2342,10 +2569,9 @@ RULES:
   (for example: a character says it, wants to say it, is about to say it, or looks as if saying it),
   keep that character as the speaker unless there is stronger contrary evidence.
 - For quote_or_letter/password_or_signal/sound_effect/thought_not_spoken, be careful: the correct label may be 非人物发声, a signal, or the attributed source rather than the nearby character
-- For rapid two-person exchanges, do not rely on alternation alone; cite the local narrative or adjacent dialogue structure
-- If there is no non-dialogue narrative between adjacent short dialogues and no explicit speech attribution,
-  high-confidence alternation may be a valid reason to disagree.
-- Be conservative. Disagree only when explicit local evidence contradicts the primary answer.
+- For rapid two-person exchanges, do not rely on alternation alone; cite the local narrative or adjacent dialogue structure.
+- Alternation may justify a risk warning, but it is not enough for high-confidence disagreement by itself.
+- Be conservative. Disagree only when explicit local evidence, verified identity alias, or clear quote-type evidence contradicts the primary answer.
 - evidence_basis=explicit_attribution only when the local text directly attributes the target quote to a source
   with a speech/thought verb such as says, asks, answers, continues, wants to say, or looks as if saying.
 - evidence_basis=speaker_action is weaker. Do not use it for a person's later movement or reaction unless it
@@ -2355,7 +2581,7 @@ RULES:
 
 OUTPUT:
 <quote_type>type</quote_type>
-<evidence_basis>explicit_attribution|speaker_action|quote_type|alternation|inference|unknown</evidence_basis>
+<evidence_basis>explicit_attribution|speaker_action|identity_alias|quote_type|alternation|inference|unknown</evidence_basis>
 <confidence>high|medium|low</confidence>
 <verdict>confirm</verdict> or <verdict>disagree</verdict>
 <suggested_speaker>name</suggested_speaker>
@@ -2379,6 +2605,8 @@ Original text navigation:
 {compact_navigation}
 
 {structure_hint}
+
+{local_evidence_hint}
 
 {compact_short_mem}
 
@@ -2478,12 +2706,14 @@ Risk reasons:
 
 {structure_hint}
 
+{local_evidence_hint}
+
 [Tool result]
 {compact_text(chr(10).join(tool_results), 12000, keep="tail")}
 
 Output exactly:
 <quote_type>type</quote_type>
-<evidence_basis>explicit_attribution|speaker_action|quote_type|alternation|inference|unknown</evidence_basis>
+<evidence_basis>explicit_attribution|speaker_action|identity_alias|quote_type|alternation|inference|unknown</evidence_basis>
 <confidence>high|medium|low</confidence>
 <verdict>confirm</verdict> or <verdict>disagree</verdict>
 <suggested_speaker>name</suggested_speaker>
@@ -2559,6 +2789,15 @@ class Boss:
             deep_search_fn=deep_search_identity,
             find_refs_fn=find_all_references
         )
+
+    def _canonicalize_verified_alias(self, speaker):
+        cleaned = validate_char_name(speaker)
+        if not cleaned or cleaned in {NON_PERSON_LABEL, "?"}:
+            return speaker, ""
+        canonical, status = self.vault.alias_status(cleaned)
+        if canonical != cleaned and status == "verified":
+            return canonical, f"verified alias {cleaned} -> {canonical}"
+        return cleaned, ""
 
     def _find_dialogue_index(self, line_num, dialogue):
         """Find the target dialogue in the extracted dialogue list."""
@@ -2675,25 +2914,60 @@ class Boss:
 
     def _is_short_or_fragment(self, dialogue):
         text = (dialogue or "").strip()
-        han_count = len(re.findall(r"[\u4e00-\u9fff]", text))
+        han_count = len(re.findall(r"[一-鿿]", text))
         return len(text) <= 12 or han_count <= 4
 
-    def _risk_reasons(self, speaker, dialogue, tool_rounds_used, next_expected, local_structure=None):
+    def _label_matches_local_candidates(self, label, local_evidence):
+        cleaned = validate_char_name(label) or (label or "").strip()
+        if not cleaned or cleaned == NON_PERSON_LABEL:
+            return False
+        candidates = (local_evidence or {}).get("attribution_candidates") or []
+        named_candidates = []
+        for item in candidates:
+            candidate = validate_char_name(item.get("speaker")) or item.get("speaker", "")
+            if candidate and not is_generic_speaker_label(candidate):
+                named_candidates.append(candidate)
+        if not named_candidates:
+            return True
+        return any(cleaned == cand or cleaned in cand or cand in cleaned for cand in named_candidates)
+
+    def _risk_reasons(self, speaker, dialogue, tool_rounds_used, next_expected,
+                      local_structure=None, local_evidence=None, labeler_evidence=None):
         """Return generic risk reasons that should trigger independent review."""
         reasons = []
         normalized = (speaker or "").strip()
+        cleaned = validate_char_name(normalized) or normalized
+        labeler_evidence = labeler_evidence or {}
+        basis = (labeler_evidence.get("evidence_basis") or "unknown").strip().lower()
+        confidence = (labeler_evidence.get("confidence") or "low").strip().lower()
+        quote_type = (labeler_evidence.get("quote_type") or "unclear").strip().lower()
         short_fragment = self._is_short_or_fragment(dialogue)
-        phase_conflict = bool(next_expected and normalized and normalized != next_expected)
+        phase_conflict = bool(next_expected and cleaned and cleaned != next_expected)
         no_narrative_break = bool(
             local_structure and local_structure.get("no_narrative_break_from_previous")
         )
+        local_candidates = (local_evidence or {}).get("attribution_candidates") or []
+        quote_cautions = (local_evidence or {}).get("quote_type_cautions") or []
 
-        if normalized == "?":
+        if cleaned == "?":
             reasons.append("speaker unresolved")
-        if normalized in TEMP_DESCRIPTORS:
-            reasons.append("speaker is a temporary descriptor and may need identity verification")
-        if validate_char_name(normalized) == NON_PERSON_LABEL:
+        if is_generic_speaker_label(cleaned):
+            reasons.append("speaker is a generic descriptor and may need canonical named identity")
+        if validate_char_name(cleaned) == NON_PERSON_LABEL:
             reasons.append("speaker is non-person; quote type should be verified")
+        if quote_cautions and self._is_concrete_speaker(cleaned):
+            reasons.append("local quote-type cautions may mean this is not ordinary direct speech")
+        if local_candidates and not self._label_matches_local_candidates(cleaned, local_evidence):
+            reasons.append("nearby explicit attribution candidate does not match current speaker")
+        if basis in {"alternation", "inference", "unknown"}:
+            if short_fragment or no_narrative_break or local_candidates:
+                reasons.append(f"labeler relied on weak evidence_basis={basis}")
+        if confidence == "low":
+            reasons.append("labeler confidence is low")
+        if quote_type in {"thought_or_narration", "sound_or_text"} and self._is_concrete_speaker(cleaned):
+            reasons.append(f"labeler quote_type={quote_type} conflicts with concrete speaker")
+        if quote_type in {"direct_speech", "group_speech"} and validate_char_name(cleaned) == NON_PERSON_LABEL:
+            reasons.append(f"labeler quote_type={quote_type} conflicts with non-person speaker")
         if phase_conflict:
             if no_narrative_break:
                 reasons.append("speaker conflicts with adjacent two-person exchange without narrative break")
@@ -2701,25 +2975,21 @@ class Boss:
                 reasons.append("speaker conflicts with recent two-person exchange expectation")
         if no_narrative_break and self.short_mem.detect_rapid_exchange(3) and short_fragment:
             reasons.append("short line follows adjacent dialogue without narrative break")
-        if (
-            local_structure
-            and local_structure.get("has_nearby_attribution_word")
-            and (phase_conflict or normalized in TEMP_DESCRIPTORS or normalized == "?")
-        ):
+        if local_structure and local_structure.get("has_nearby_attribution_word"):
             reasons.append("nearby speech attribution words should be checked")
         if self.short_mem.detect_rapid_exchange(4) and short_fragment:
             reasons.append("short or fragmentary line inside a rapid exchange")
         if reasons and tool_rounds_used <= 1 and short_fragment:
             reasons.append("low evidence depth for a short or fragmentary line")
 
-        return reasons
+        return list(dict.fromkeys(reasons))
 
     def _is_concrete_speaker(self, speaker):
         cleaned = validate_char_name(speaker)
-        return bool(cleaned and cleaned not in (NON_PERSON_LABEL, "?") and cleaned not in TEMP_DESCRIPTORS)
+        return bool(cleaned and cleaned not in (NON_PERSON_LABEL, "?") and not is_generic_speaker_label(cleaned))
 
     def _should_apply_verifier_change(self, current_speaker, suggested, verifier_reason,
-                                      evidence_basis="unknown", confidence="low"):
+                                      evidence_basis="unknown", confidence="low", local_evidence=None):
         """Conservatively decide whether Verifier may override the primary label."""
         current = validate_char_name(current_speaker) or current_speaker
         proposed = validate_char_name(suggested)
@@ -2727,6 +2997,12 @@ class Boss:
             return False
 
         current_is_concrete = self._is_concrete_speaker(current)
+        current_is_generic = is_generic_speaker_label(current)
+        proposed_is_generic = is_generic_speaker_label(proposed)
+
+        # Never replace a concrete named speaker with a vague role/appearance label.
+        if current_is_concrete and proposed_is_generic:
+            return False
 
         basis = (evidence_basis or "unknown").strip().lower()
         conf = (confidence or "low").strip().lower()
@@ -2745,13 +3021,17 @@ class Boss:
             if basis != "quote_type" or not any(p in reason for p in nonperson_strong_phrases):
                 return False
 
+        # Alternation is allowed to trigger review, but it is no longer enough to rewrite labels.
         if basis in {"alternation", "dialogue_structure", "dialogue structure"}:
-            alternation_strong_phrases = (
-                "no narrative", "without narrative", "no intervening narrative",
-                "adjacent dialogue", "rapid exchange", "alternating",
-                "没有叙述", "无叙述", "相邻对话", "连续对话", "快速对话", "交替",
-            )
-            return any(p in reason for p in alternation_strong_phrases)
+            return False
+
+        if current == NON_PERSON_LABEL and proposed != NON_PERSON_LABEL and basis != "explicit_attribution":
+            return False
+        if basis == "quote_type" and proposed != NON_PERSON_LABEL:
+            return False
+
+        if basis == "identity_alias":
+            return current_is_generic and not proposed_is_generic
 
         strong_bases = {"explicit_attribution", "quote_type"}
         if basis not in strong_bases:
@@ -2766,6 +3046,10 @@ class Boss:
             "明确", "直接", "说：", "说道", "问道", "回答", "开口", "喊道", "叫道",
         )
         if any(p in reason for p in weak_phrases) and not any(p in reason for p in strong_phrases):
+            return False
+        if basis == "explicit_attribution" and not any(p in reason for p in strong_phrases):
+            return False
+        if basis == "explicit_attribution" and not self._label_matches_local_candidates(proposed, local_evidence):
             return False
 
         narrative_non_person_phrases = (
@@ -2795,6 +3079,8 @@ class Boss:
         navigation_text = self._build_navigation(line_num, nav_range=25)
         local_structure = self._local_dialogue_structure(line_num, dialogue)
         structure_hint = self._format_structure_hint(local_structure)
+        local_evidence = analyze_local_evidence(line_num, dialogue, local_structure)
+        local_evidence_hint = format_local_evidence_hint(local_evidence)
 
         # 2. Get evidence and memory
         evidence_text = self.vault.get_state_text(current_line=line_num)
@@ -2816,6 +3102,7 @@ class Boss:
             "evidence": evidence_text,
             "navigation": navigation_text,
             "local_structure": local_structure,
+            "local_evidence": local_evidence,
         }
         temp_log_event(
             "round_context_ready",
@@ -2824,6 +3111,7 @@ class Boss:
             short_mem_len=len(short_mem_text or ""),
             evidence_len=len(evidence_text or ""),
             context_index_len=len(context_text or ""),
+            local_evidence_len=len(local_evidence_hint or ""),
         )
 
         # 5. Call Labeler (READ-ONLY, no state writing)
@@ -2833,6 +3121,7 @@ class Boss:
             round_log, quiet=quiet, override_force_tool=True,
             recent_speakers_hint=recent_speakers_hint,
             structure_hint=structure_hint,
+            local_evidence_hint=local_evidence_hint,
         )
         self.total_tokens += pec + ec
 
@@ -2850,7 +3139,7 @@ class Boss:
             self.short_mem.phase_violation = False
 
         # 6. SearchAgent: conditional trigger for temporary descriptors
-        if speaker in TEMP_DESCRIPTORS:
+        if is_generic_speaker_label(speaker):
             self.search_agent_triggers += 1
             if not quiet:
                 try:
@@ -2886,8 +3175,18 @@ class Boss:
                 if not quiet:
                     self._safe_print(f"  SearchAgent: no identity found for '{speaker}'")
 
+        canonical_speaker, canonical_reason = self._canonicalize_verified_alias(speaker)
+        if canonical_reason:
+            old_speaker = speaker
+            speaker = canonical_speaker
+            corrected = True
+            self.corrections += 1
+            reason_text = f"{reason_text} | Canonicalized {old_speaker} -> {speaker}: {canonical_reason}".strip()
+            if not quiet:
+                self._safe_print(f"  Canonicalized: {old_speaker} -> {speaker}")
+
         # 7. Update EvidenceVault last_seen
-        if speaker and speaker != "非人物发声" and speaker != "non-human":
+        if speaker and speaker != NON_PERSON_LABEL and speaker != "non-human" and not is_generic_speaker_label(speaker):
             self.vault.update_last_seen(speaker, line_num)
 
         # 8. Fallback
@@ -2898,7 +3197,10 @@ class Boss:
         # names or organizations; it only checks ambiguity patterns that occur
         # across novels.
         risk_reasons = self._risk_reasons(
-            speaker, dialogue, tool_rounds_used, next_exp, local_structure=local_structure
+            speaker, dialogue, tool_rounds_used, next_exp,
+            local_structure=local_structure,
+            local_evidence=local_evidence,
+            labeler_evidence=round_log.get("labeler_evidence", {}),
         )
         if risk_reasons:
             if not quiet:
@@ -2911,6 +3213,7 @@ class Boss:
                     "", evidence_text, speaker, round_log, quiet=quiet,
                     risk_reasons=risk_reasons,
                     structure_hint=structure_hint,
+                    local_evidence_hint=local_evidence_hint,
                 )
             except Exception as exc:
                 verdict = "skipped"
@@ -2930,7 +3233,8 @@ class Boss:
             }
             temp_log_event("risk_review_complete", round_log, review=round_log["risk_review"])
             if verdict == "disagree" and self._should_apply_verifier_change(
-                speaker, suggested, verifier_reason, evidence_basis, confidence
+                speaker, suggested, verifier_reason, evidence_basis, confidence,
+                local_evidence=local_evidence,
             ):
                 old_speaker = speaker
                 speaker = validate_char_name(suggested) or suggested
