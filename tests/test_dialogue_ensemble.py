@@ -14,7 +14,15 @@ from dialogue_ensemble import (  # noqa: E402
 )
 import requests  # noqa: E402
 
-from run_label import ApiModel, QualityEnsemble, ShortMemAgent, _should_failover_to_next_model  # noqa: E402
+from run_label import (  # noqa: E402
+    ApiModel,
+    NON_PERSON_LABEL,
+    QualityAudit,
+    QualityEnsemble,
+    ShortMemAgent,
+    _should_failover_to_next_model,
+    is_valid_final_speaker,
+)
 
 
 class DialoguePacketTests(unittest.TestCase):
@@ -109,6 +117,161 @@ class QualityDecisionTests(unittest.TestCase):
             tool["function"]["parameters"]["required"],
             ["target_speaker", "citations"],
         )
+
+
+class BaselinePreservingAuditTests(unittest.TestCase):
+    def setUp(self):
+        self.audit = QualityAudit(dialogue_radius=4)
+        self.packet = {"raw_lines": [{"line": 10, "text": "raw"}]}
+
+    @staticmethod
+    def quote_card(kind):
+        return {
+            "valid": True,
+            "voice_kind": kind,
+            "quote_type": "sound_or_text" if kind == "non_person" else "direct_speech",
+            "confidence": "high",
+            "citations": [10],
+        }
+
+    @staticmethod
+    def speaker_card(speaker, basis="explicit_attribution"):
+        return {
+            "valid": True,
+            "speaker": speaker,
+            "evidence_basis": basis,
+            "confidence": "high",
+            "citations": [10],
+            "quote_type": "direct_speech",
+        }
+
+    def select(self, baseline, quote_cards, attribution_cards, final_card):
+        return self.audit._select_decision(
+            baseline,
+            {"quote_type": "unclear"},
+            quote_cards,
+            attribution_cards,
+            final_card,
+            self.packet,
+        )
+
+    def test_nonperson_requires_quote_and_attribution_support(self):
+        quotes = [self.quote_card("non_person") for _ in range(3)]
+        attributions = [self.speaker_card(NON_PERSON_LABEL, "quote_type") for _ in range(3)]
+        decision = self.select("甲", quotes, attributions, self.speaker_card(NON_PERSON_LABEL, "quote_type"))
+
+        self.assertEqual(decision["speaker"], NON_PERSON_LABEL)
+        self.assertEqual(decision["selection_source"], "audited-non-person")
+
+    def test_final_nonperson_alone_cannot_override_baseline(self):
+        quotes = [self.quote_card("person") for _ in range(3)]
+        attributions = [self.speaker_card("甲") for _ in range(3)]
+        decision = self.select("甲", quotes, attributions, self.speaker_card(NON_PERSON_LABEL, "quote_type"))
+
+        self.assertEqual(decision["speaker"], "甲")
+        self.assertEqual(decision["selection_source"], "baseline-retained")
+
+    def test_speaker_change_requires_all_scene_audits_and_final_judge(self):
+        quotes = [self.quote_card("person") for _ in range(3)]
+        split = [self.speaker_card("乙"), self.speaker_card("乙"), self.speaker_card("甲")]
+        decision = self.select("甲", quotes, split, self.speaker_card("乙"))
+        self.assertEqual(decision["speaker"], "甲")
+
+        unanimous = [self.speaker_card("乙") for _ in range(3)]
+        decision = self.select("甲", quotes, unanimous, self.speaker_card("乙"))
+        self.assertEqual(decision["speaker"], "乙")
+        self.assertEqual(decision["selection_source"], "audited-speaker-correction")
+
+    def test_joint_panel_can_correct_with_two_final_and_three_scene_votes(self):
+        quotes = [self.quote_card("person") for _ in range(3)]
+        attributions = [self.speaker_card("甲") for _ in range(2)] + [self.speaker_card("乙") for _ in range(3)]
+        final = self.speaker_card("乙")
+        final.update({"panel_support": 2, "panel_size": 3})
+
+        decision = self.select("甲", quotes, attributions, final)
+
+        self.assertEqual(decision["speaker"], "乙")
+        self.assertEqual(decision["selection_source"], "joint-panel-correction")
+
+    def test_strong_local_panel_can_correct_named_speaker_without_final_support(self):
+        quotes = [self.quote_card("person") for _ in range(3)]
+        attributions = [self.speaker_card("乙") for _ in range(4)] + [self.speaker_card("甲")]
+        opposing_final = self.speaker_card("甲")
+        opposing_final.update({"panel_support": 3, "panel_size": 3})
+
+        decision = self.select("甲", quotes, attributions, opposing_final)
+
+        self.assertEqual(decision["speaker"], "乙")
+        self.assertEqual(decision["selection_source"], "strong-local-panel-correction")
+
+    def test_explicit_five_vote_attribution_can_restore_person_from_nonperson(self):
+        quotes = [self.quote_card("non_person") for _ in range(3)]
+        attributions = [self.speaker_card("乙") for _ in range(5)]
+        final = self.speaker_card(NON_PERSON_LABEL, "quote_type")
+        final.update({
+            "panel_support": 2,
+            "panel_size": 3,
+            "panel_speakers": [NON_PERSON_LABEL, NON_PERSON_LABEL, "乙"],
+        })
+
+        decision = self.select(NON_PERSON_LABEL, quotes, attributions, final)
+
+        self.assertEqual(decision["speaker"], "乙")
+        self.assertEqual(decision["selection_source"], "explicit-local-person-restoration")
+
+    def test_two_neighbor_anchor_votes_can_resolve_three_vote_plurality(self):
+        decision = {
+            "speaker": "甲",
+            "baseline_changed": False,
+            "selection_source": "baseline-retained",
+            "confirmed_anchor": False,
+        }
+        previous_cards = [
+            self.speaker_card("甲"),
+            self.speaker_card("甲"),
+            self.speaker_card("乙"),
+        ]
+        next_cards = [
+            self.speaker_card("甲"),
+            self.speaker_card("甲"),
+            self.speaker_card("甲"),
+        ]
+
+        updated = self.audit._apply_split_neighbor_result(
+            decision, "甲", "乙", previous_cards, next_cards
+        )
+
+        self.assertEqual(updated["speaker"], "乙")
+        self.assertEqual(updated["selection_source"], "split-neighbor-anchor-correction")
+        self.assertFalse(updated["confirmed_anchor"])
+
+    def test_untranslated_and_protocol_labels_are_rejected(self):
+        self.assertFalse(is_valid_final_speaker("Lawrence"))
+        self.assertFalse(is_valid_final_speaker("unclear"))
+        self.assertTrue(is_valid_final_speaker("甲"))
+        self.assertTrue(is_valid_final_speaker(NON_PERSON_LABEL))
+
+    def test_non_speech_reason_overrides_contradictory_person_field(self):
+        quote = self.audit._normalize_card_consistency(
+            {
+                "voice_kind": "person",
+                "quote_type": "embedded_quote",
+                "reason": "This describes a facial expression, not actual speech.",
+            },
+            "quote",
+        )
+        speaker = self.audit._normalize_card_consistency(
+            {
+                "speaker": "甲",
+                "evidence_basis": "explicit_attribution",
+                "reason": "这是叙述性文字，并非人物说出的台词。",
+            },
+            "speaker",
+        )
+
+        self.assertEqual(quote["voice_kind"], "non_person")
+        self.assertEqual(speaker["speaker"], NON_PERSON_LABEL)
+        self.assertEqual(speaker["evidence_basis"], "quote_type")
 
 
 class ApiFallbackTests(unittest.TestCase):
