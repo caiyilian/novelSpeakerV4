@@ -30,6 +30,14 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
+from dialogue_ensemble import (
+    build_dialogue_packet,
+    citations_are_local,
+    format_dialogue_packet,
+    get_tag as get_ensemble_tag,
+    parse_line_citations,
+)
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(SCRIPT_DIR)
 
@@ -67,8 +75,10 @@ API_RETRIES = 3
 API_RETRY_DELAY = 5.0
 API_CALL_TRACE = []
 CURRENT_ROUND_TRACE = None
+API_ROUND_ROBIN_CURSOR = {}
 SENSENOVA_MODEL = "sensenova-6.7-flash-lite"
 SENSENOVA_KEYS_PATH = os.path.join(ROOT_DIR, "config", "other_sensenova_apikeys")
+DECISION_MODE = os.environ.get("NOVEL_DECISION_MODE", "quality").strip().lower()
 
 
 def _env_int(name, default):
@@ -83,6 +93,12 @@ def _env_float(name, default):
         return float(os.environ.get(name, default))
     except (TypeError, ValueError):
         return default
+
+
+DIALOGUE_BLOCK_RADIUS = _env_int("NOVEL_DIALOGUE_BLOCK_RADIUS", 4)
+QUALITY_REQUEST_TIMEOUT = _env_int("NOVEL_QUALITY_REQUEST_TIMEOUT", 120)
+QUALITY_SCENE_RADIUS = _env_int("NOVEL_QUALITY_SCENE_RADIUS", 12)
+QUALITY_AUDIT_RETRIES = max(1, _env_int("NOVEL_QUALITY_AUDIT_RETRIES", 2))
 
 
 def _resolve_workspace_path(path_value):
@@ -125,7 +141,8 @@ class ModelCallError(RuntimeError):
 
 class ApiModel:
     def __init__(self, name, model, base_url, api_key="", min_interval=1.5,
-                 tool_capable=True, display_model=None, use_env_proxy=True):
+                 tool_capable=True, display_model=None, use_env_proxy=True,
+                 round_robin_group=""):
         self.name = name
         self.model = model
         self.display_model = display_model or model
@@ -138,6 +155,7 @@ class ApiModel:
         self.cooldown_until = 0.0
         self.last_error = ""
         self.disabled = False
+        self.round_robin_group = round_robin_group
 
     @property
     def label(self):
@@ -288,6 +306,7 @@ def _append_sensenova_models(models):
                 tool_capable=True,
                 display_model=f"{SENSENOVA_MODEL}-{suffix}",
                 use_env_proxy=use_env_proxy,
+                round_robin_group="sense-nova",
             ))
         return
 
@@ -323,6 +342,31 @@ def _apply_api_priority(models):
         ranked.append((rank, original_index, model))
     ranked.sort(key=lambda item: (item[0], item[1]))
     return [model for _, _, model in ranked]
+
+
+def _api_model_iteration_order():
+    """Return API models with same-provider key pools rotated per request."""
+    if not API_MODELS:
+        return []
+
+    ordered = []
+    emitted_groups = set()
+    for model in API_MODELS:
+        group = model.round_robin_group
+        if not group:
+            ordered.append(model)
+            continue
+        if group in emitted_groups:
+            continue
+        emitted_groups.add(group)
+        group_models = [m for m in API_MODELS if m.round_robin_group == group]
+        if len(group_models) <= 1:
+            ordered.extend(group_models)
+            continue
+        cursor = API_ROUND_ROBIN_CURSOR.get(group, 0) % len(group_models)
+        API_ROUND_ROBIN_CURSOR[group] = (cursor + 1) % len(group_models)
+        ordered.extend(group_models[cursor:] + group_models[:cursor])
+    return ordered
 
 
 def _append_opencode_model(models, provider_name, model_name, min_interval=2.0):
@@ -430,7 +474,7 @@ def _openai_messages(messages):
     return converted
 
 
-def _api_chat(model, messages, tools=None, tool_choice="auto"):
+def _api_chat(model, messages, tools=None, tool_choice="auto", request_timeout=300):
     estimated_tokens = _estimate_message_tokens(messages)
     if estimated_tokens + API_MAX_OUTPUT_TOKENS > API_CONTEXT_LIMIT:
         raise ModelCallError(
@@ -451,7 +495,7 @@ def _api_chat(model, messages, tools=None, tool_choice="auto"):
         payload["tool_choice"] = tool_choice
     with requests.Session() as session:
         session.trust_env = model.use_env_proxy
-        resp = session.post(model.chat_url, headers=headers, json=payload, timeout=300)
+        resp = session.post(model.chat_url, headers=headers, json=payload, timeout=request_timeout)
     model.last_call_at = time.time()
     if resp.status_code == 429:
         model.mark_failure("rate limited", cooldown=120)
@@ -505,8 +549,9 @@ def _health_check_model(model, needs_tools):
 
 
 def init_api_fallback(health_check="all"):
-    global API_MODELS
+    global API_MODELS, API_ROUND_ROBIN_CURSOR
     API_MODELS = _build_api_models()
+    API_ROUND_ROBIN_CURSOR = {}
     if not API_MODELS:
         raise ModelCallError("No API fallback models configured. Set ZHIPUAI_API_KEY or configure opencode providers.")
 
@@ -514,7 +559,8 @@ def init_api_fallback(health_check="all"):
         print("  API fallback health check: skipped")
         print("  API fallback order:")
         for model in API_MODELS:
-            print(f"    PEND {model.label} (lazy check on first use)")
+            rr = f" rr={model.round_robin_group}" if model.round_robin_group else ""
+            print(f"    PEND {model.label}{rr} (lazy check on first use)")
         return
 
     print("  API fallback health check:")
@@ -528,16 +574,19 @@ def init_api_fallback(health_check="all"):
             _health_check_model(model, needs_tools=needs_tools)
             if needs_tools:
                 usable.append(model)
-                print(f"    OK   {model.label} (chat + tools)")
+                rr = f" rr={model.round_robin_group}" if model.round_robin_group else ""
+                print(f"    OK   {model.label}{rr} (chat + tools)")
             else:
-                print(f"    CHAT {model.label} (chat only, skipped for tool rounds)")
+                rr = f" rr={model.round_robin_group}" if model.round_robin_group else ""
+                print(f"    CHAT {model.label}{rr} (chat only, skipped for tool rounds)")
         except Exception as exc:
             model.mark_failure(str(exc), cooldown=300)
             print(f"    FAIL {model.label} ({str(exc)[:100]})")
     if health_check == "first":
         for model in API_MODELS:
             if model.label not in checked:
-                print(f"    PEND {model.label} (lazy fallback)")
+                rr = f" rr={model.round_robin_group}" if model.round_robin_group else ""
+                print(f"    PEND {model.label}{rr} (lazy fallback)")
     if not usable and health_check == "all":
         raise ModelCallError("All tool-capable API fallback models failed health checks.")
 
@@ -650,6 +699,30 @@ def _should_retry_model_error(exc):
     return any(marker in text for marker in retry_markers)
 
 
+def _should_failover_to_next_model(exc, model):
+    """Avoid retrying one stalled account when a round-robin pool has peers."""
+    if not getattr(model, "round_robin_group", ""):
+        return False
+    if isinstance(exc, (requests.exceptions.Timeout, requests.exceptions.ConnectionError)):
+        return True
+    text = str(exc).lower()
+    return any(marker in text for marker in ("read timed out", "connection aborted", "max retries exceeded"))
+
+
+def _cooldown_for_model_error(exc):
+    text = str(exc)
+    lowered = text.lower()
+    if any(marker in lowered for marker in ("http 401", "http 403", "invalid api key", "unauthorized", "forbidden")):
+        return 3600
+    if any(marker in lowered for marker in ("http 429", "rate limit", "too many requests", "quota", "insufficient")):
+        return 300
+    if isinstance(exc, (requests.exceptions.Timeout, requests.exceptions.ConnectionError)):
+        return 60
+    if any(marker in text for marker in ("HTTP 500", "HTTP 502", "HTTP 503", "HTTP 504")):
+        return 60
+    return 30
+
+
 def _sleep_before_retry(attempt):
     if API_RETRY_DELAY <= 0:
         return
@@ -755,35 +828,44 @@ def compact_text(text, max_chars, keep="tail"):
     return marker + text[-keep_chars:]
 
 
-def call_api_fallback(messages, tools=None, label=""):
+def call_api_fallback(messages, tools=None, label="", request_timeout=None, tool_choice="auto"):
     global API_CALL_TRACE
     needs_tools = bool(tools)
     expects_tool = _expects_tool_call(messages, tools)
+    effective_timeout = max(1, int(request_timeout or 300))
     errors = []
     max_attempts = max(1, int(API_RETRIES or 1))
-    for model in API_MODELS:
+    for model in _api_model_iteration_order():
         if not model.available(needs_tools):
             continue
         for attempt in range(1, max_attempts + 1):
             try:
-                tool_choice = "auto"
+                effective_tool_choice = tool_choice
                 if expects_tool and model.name != "agnes":
-                    tool_choice = {"type": "function", "function": {"name": "read_novel_lines"}}
+                    effective_tool_choice = {"type": "function", "function": {"name": "read_novel_lines"}}
                 temp_log_event(
                     "model_call_start",
                     label=label,
                     provider=model.name,
                     model=model.model,
                     model_label=model.label,
+                    round_robin_group=model.round_robin_group,
                     tools_enabled=bool(tools),
                     expects_tool=expects_tool,
-                    tool_choice=tool_choice,
+                    tool_choice=effective_tool_choice,
                     attempt=attempt,
                     max_attempts=max_attempts,
                     api_context_limit=API_CONTEXT_LIMIT,
+                    request_timeout=effective_timeout,
                     **_message_trace_summary(messages),
                 )
-                text, pec, ec, tool_calls = _api_chat(model, messages, tools=tools, tool_choice=tool_choice)
+                text, pec, ec, tool_calls = _api_chat(
+                    model,
+                    messages,
+                    tools=tools,
+                    tool_choice=effective_tool_choice,
+                    request_timeout=effective_timeout,
+                )
                 coerced_tool_call = False
                 recovered_required_tool_call = False
                 if not tool_calls:
@@ -799,6 +881,7 @@ def call_api_fallback(messages, tools=None, label=""):
                             provider=model.name,
                             model=model.model,
                             model_label=model.label,
+                            round_robin_group=model.round_robin_group,
                             attempt=attempt,
                             reason="synthesized required read_novel_lines call from target line",
                             tool_calls=len(tool_calls),
@@ -812,6 +895,7 @@ def call_api_fallback(messages, tools=None, label=""):
                         provider=model.name,
                         model=model.model,
                         model_label=model.label,
+                        round_robin_group=model.round_robin_group,
                         attempt=attempt,
                         max_attempts=max_attempts,
                         reason="expected tool call but model returned none",
@@ -827,6 +911,7 @@ def call_api_fallback(messages, tools=None, label=""):
                             provider=model.name,
                             model=model.model,
                             model_label=model.label,
+                            round_robin_group=model.round_robin_group,
                             attempt=attempt,
                             next_attempt=attempt + 1,
                             reason="no tool call",
@@ -841,6 +926,7 @@ def call_api_fallback(messages, tools=None, label=""):
                     provider=model.name,
                     model=model.model,
                     model_label=model.label,
+                    round_robin_group=model.round_robin_group,
                     tools_enabled=bool(tools),
                     tool_calls=len(tool_calls),
                     coerced_text_tool_call=coerced_tool_call,
@@ -856,8 +942,9 @@ def call_api_fallback(messages, tools=None, label=""):
                     "provider": model.name,
                     "model": model.model,
                     "model_label": model.label,
+                    "round_robin_group": model.round_robin_group,
                     "tools_enabled": bool(tools),
-                    "tool_choice": tool_choice,
+                    "tool_choice": effective_tool_choice,
                     "tool_calls": len(tool_calls),
                     "coerced_text_tool_call": coerced_tool_call,
                     "recovered_required_tool_call": recovered_required_tool_call,
@@ -873,6 +960,7 @@ def call_api_fallback(messages, tools=None, label=""):
                     provider=model.name,
                     model=model.model,
                     model_label=model.label,
+                    round_robin_group=model.round_robin_group,
                     tools_enabled=bool(tools),
                     attempt=attempt,
                     max_attempts=max_attempts,
@@ -881,6 +969,20 @@ def call_api_fallback(messages, tools=None, label=""):
                     **_message_trace_summary(messages),
                 )
                 err = str(exc)[:160]
+                if _should_failover_to_next_model(exc, model):
+                    errors.append(err)
+                    model.mark_failure(err, cooldown=_cooldown_for_model_error(exc))
+                    temp_log_event(
+                        "model_call_failover",
+                        label=label,
+                        provider=model.name,
+                        model=model.model,
+                        model_label=model.label,
+                        round_robin_group=model.round_robin_group,
+                        attempt=attempt,
+                        reason="transient round-robin member failure; trying next model",
+                    )
+                    break
                 if attempt < max_attempts and _should_retry_model_error(exc):
                     errors.append(f"{err} (attempt {attempt}/{max_attempts})")
                     temp_log_event(
@@ -889,6 +991,7 @@ def call_api_fallback(messages, tools=None, label=""):
                         provider=model.name,
                         model=model.model,
                         model_label=model.label,
+                        round_robin_group=model.round_robin_group,
                         attempt=attempt,
                         next_attempt=attempt + 1,
                         reason=err,
@@ -896,6 +999,7 @@ def call_api_fallback(messages, tools=None, label=""):
                     _sleep_before_retry(attempt)
                     continue
                 errors.append(err)
+                model.mark_failure(err, cooldown=_cooldown_for_model_error(exc))
                 break
     detail = "; ".join(errors[-5:]) if errors else "no model available outside cooldown"
     temp_log_event(
@@ -915,9 +1019,16 @@ TEMP_DESCRIPTORS = {
     "老者", "老妇人", "老翁", "对方", "陌生人", "路人", "来客", "访客",
     "男商人", "女商人", "年轻商人", "老商人", "中年商人", "旅行商人", "行商人", "商人",
     "兑换商", "皮草商", "店主", "老板", "酒吧老板", "店员", "服务生",
-    "女服务生", "男服务生", "红发女孩", "客人", "男客人", "女客人",
+    "女服务生", "男服务生", "红发女孩", "红发少女", "红发女子", "客人", "男客人", "女客人",
     "房客", "乞丐", "修女", "祭司", "旅人", "工匠", "磨粉匠", "摊贩",
     "摊贩老板", "车夫", "船夫", "守卫", "卫兵", "士兵", "神父",
+    "村民", "村人", "镇民", "居民", "市民", "群众", "众人", "人群", "一行人",
+    "来人", "那人", "这个人", "那个人", "同伴", "旅伴", "手下", "追兵", "部下",
+    "伙计", "职员", "员工", "成员", "商行员工", "商行成员", "商行同伴", "商行手下",
+    "中年男子", "中年女人", "中年女子", "年轻男子", "年轻女子", "年轻女孩",
+    "金发女孩", "黑发男子", "店老板", "店家", "老板娘", "女主人", "男主人", "主人",
+    "佣人", "仆人", "书记员", "官员", "军人", "骑士", "贵族", "领主", "代理人",
+    "船员", "水手", "牧羊人", "牧羊女", "教师", "学生", "医师", "医生",
 }
 
 # Forward search patterns for name reveal (must be actual name-introduction, not generic "I am X")
@@ -1292,9 +1403,15 @@ def write_label(name):
         f.write(name + "\n")
 
 
-def call_ollama(messages, tools=None, label=""):
+def call_ollama(messages, tools=None, label="", request_timeout=None, tool_choice="auto"):
     if MODEL_PROVIDER == "api-fallback":
-        return call_api_fallback(messages, tools=tools, label=label)
+        return call_api_fallback(
+            messages,
+            tools=tools,
+            label=label,
+            request_timeout=request_timeout,
+            tool_choice=tool_choice,
+        )
 
     url = f"{OLLAMA_BASE_URL}/api/chat"
     payload = {
@@ -1314,7 +1431,7 @@ def call_ollama(messages, tools=None, label=""):
         **_message_trace_summary(messages),
     )
     try:
-        resp = requests.post(url, json=payload, timeout=300)
+        resp = requests.post(url, json=payload, timeout=max(1, int(request_timeout or 300)))
         data = resp.json()
         pec = data.get("prompt_eval_count", 0)
         ec = data.get("eval_count", 0)
@@ -1387,6 +1504,50 @@ TOOL_SEARCH_NOVEL = {
 
 LABELER_TOOLS = [TOOL_READ_NOVEL, TOOL_SEARCH_NOVEL]
 
+QUALITY_OUTPUT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "submit_review",
+        "description": "Submit one structured, evidence-cited quality review decision.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "speaker": {"type": "string"},
+                "target_speaker": {"type": "string"},
+                "preferred_speaker": {"type": "string"},
+                "block_assignments": {"type": "string"},
+                "quote_type": {
+                    "type": "string",
+                    "enum": [
+                        "direct_speech", "group_speech", "embedded_quote",
+                        "thought_or_narration", "sound_or_text", "unclear",
+                    ],
+                },
+                "voice_kind": {
+                    "type": "string",
+                    "enum": ["person", "group", "non_person", "unclear"],
+                },
+                "evidence_basis": {
+                    "type": "string",
+                    "enum": [
+                        "explicit_attribution", "speaker_action", "quote_type",
+                        "alternation", "inference", "unknown",
+                    ],
+                },
+                "confidence": {
+                    "type": "string",
+                    "enum": ["high", "medium", "low"],
+                },
+                "citations": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                },
+                "reason": {"type": "string"},
+            },
+        },
+    },
+}
+
 
 NON_PERSON_LABEL = "非人物发声"
 NON_PERSON_ALIASES = {
@@ -1394,6 +1555,7 @@ NON_PERSON_ALIASES = {
     "narrator",
     "non-human",
     "non-person",
+    "non_person",
     "nonperson",
     "not-spoken",
     "not_spoken",
@@ -1401,6 +1563,9 @@ NON_PERSON_ALIASES = {
     "sound_effect",
     "ambient-sound",
     "ambient_sound",
+    "narrative",
+    "narration",
+    "narrative_voice",
     "旁白",
     "叙述",
     "叙述者",
@@ -1449,6 +1614,164 @@ def validate_char_name(name):
     if re.search(r"[（(【\[].*[）)】\]]", name):
         return None
     return name
+
+
+INVALID_SPEAKER_OUTPUTS = {
+    "?", "unclear", "unknown", "null", "none", "speaker", "person", "group",
+}
+
+
+def is_valid_final_speaker(name):
+    """Reject protocol values and untranslated labels before they reach state or output."""
+    cleaned = validate_char_name(name)
+    if not cleaned:
+        return False
+    if cleaned == NON_PERSON_LABEL:
+        return True
+    if cleaned.strip().lower() in INVALID_SPEAKER_OUTPUTS:
+        return False
+    if re.search(r"[A-Za-z]", cleaned):
+        return False
+    return bool(re.search(r"[\u4e00-\u9fff]", cleaned))
+
+
+GENERIC_ROLE_SUFFIXES = (
+    "的人", "手下", "成员", "员工", "同伴", "部下", "追兵", "群众", "众人", "人群",
+    "男子", "女子", "女孩", "少年", "少女", "老人", "客人", "村民", "镇民", "居民",
+    "商人", "店主", "老板", "伙计", "职员", "佣人", "仆人", "士兵", "守卫", "卫兵",
+)
+SPEAKER_PRONOUNS = {
+    "我", "你", "他", "她", "它", "咱", "咱们", "我们", "你们", "他们", "她们",
+    "此人", "那人", "这人", "那个人", "这个人", "对方", "自己", "本人",
+}
+ATTRIBUTION_CLEAN_SPLITS = re.compile(r"[，,。！？；;：:\s]|(?:向|对|朝|冲|跟|和|给|把|被)")
+ATTRIBUTION_VERB_RE = re.compile(
+    r"(?P<speaker>[\u4e00-\u9fffA-Za-z0-9·•・]{1,15}(?:向|对|朝|冲|跟|和|给)?[\u4e00-\u9fffA-Za-z0-9·•・]{0,8})"
+    r"(?P<verb>说(?:道|着|完|了)?|问(?:道)?|回答|答道|喊(?:道)?|叫(?:道)?|开口|"
+    r"低语|嘀咕|喃喃|叹(?:道|息)?|笑(?:道)?|补充|继续说|表示|怒吼|大喊|小声说)"
+)
+QUOTE_TYPE_CAUTION_KEYWORDS = (
+    "写着", "刻着", "上面写", "牌子", "文字", "读作", "念作", "书上", "信上", "纸上",
+    "传来", "响起", "声音", "音效", "敲门声", "脚步声", "钟声",
+    "心想", "心里想", "心中", "脑中", "想着", "自言自语般", "仿佛", "似乎在说", "像是在说",
+)
+
+
+def is_generic_speaker_label(name):
+    """Return True for role/appearance/group labels that should not become canonical characters."""
+    cleaned = validate_char_name(name) or (name or "").strip()
+    if not cleaned or cleaned in {"?", NON_PERSON_LABEL}:
+        return False
+    if cleaned in TEMP_DESCRIPTORS:
+        return True
+    # A role followed by an apparent personal name should stay name-like.
+    for role in sorted(TEMP_DESCRIPTORS, key=len, reverse=True):
+        if cleaned.startswith(role) and len(cleaned) > len(role):
+            return False
+    if any(cleaned.endswith(suffix) for suffix in GENERIC_ROLE_SUFFIXES):
+        return True
+    return False
+
+
+def _clean_attribution_candidate(raw):
+    raw = (raw or "").strip(" 　，,。！？；;：:「」『』（）()[]【】")
+    if not raw:
+        return ""
+    parts = [p for p in ATTRIBUTION_CLEAN_SPLITS.split(raw) if p]
+    candidate = parts[0] if parts else raw
+    candidate = re.sub(r"^(于是|然后|接着|这时|那时|只见|而|但|可是|不过|同时)", "", candidate)
+    candidate = re.sub(r"(则|又|也|便|才|却|就|仍|仍然|继续)$", "", candidate)
+    candidate = candidate.strip(" 　，,。！？；;：:「」『』（）()[]【】")
+    if candidate in SPEAKER_PRONOUNS:
+        return ""
+    if not re.search(r"[\u4e00-\u9fffA-Za-z]", candidate):
+        return ""
+    return candidate[:15]
+
+
+def _extract_attribution_candidates(text):
+    candidates = []
+    for match in ATTRIBUTION_VERB_RE.finditer(text or ""):
+        candidate = _clean_attribution_candidate(match.group("speaker"))
+        if candidate:
+            candidates.append({"speaker": candidate, "verb": match.group("verb")})
+    # Handle quote-first forms: 「...」某人说道。
+    for tail in re.findall(r"」([^。！？；;]{0,30})", text or ""):
+        for match in ATTRIBUTION_VERB_RE.finditer(tail):
+            candidate = _clean_attribution_candidate(match.group("speaker"))
+            if candidate:
+                candidates.append({"speaker": candidate, "verb": match.group("verb")})
+    deduped = []
+    seen = set()
+    for item in candidates:
+        key = (item["speaker"], item["verb"])
+        if key not in seen:
+            seen.add(key)
+            deduped.append(item)
+    return deduped
+
+
+def analyze_local_evidence(line_num, dialogue, local_structure=None):
+    """Build deterministic local evidence hints without using answer labels."""
+    with open(NOVEL_PATH, "r", encoding="utf-8") as f:
+        novel_lines = [line.rstrip("\n") for line in f.readlines()]
+    if not (1 <= line_num <= len(novel_lines)):
+        return {"line_num": line_num, "target_line": "", "attribution_candidates": [], "quote_type_cautions": []}
+
+    start = max(1, line_num - 3)
+    end = min(len(novel_lines), line_num + 2)
+    local_items = []
+    candidates = []
+    for ln in range(start, end + 1):
+        text = novel_lines[ln - 1].strip()
+        local_items.append((ln, text))
+        for item in _extract_attribution_candidates(text):
+            item = dict(item)
+            item["line"] = ln
+            item["text"] = text[:120]
+            candidates.append(item)
+
+    target_line = novel_lines[line_num - 1].strip()
+    cautions = []
+    if target_line.count("「") > 1:
+        cautions.append("multiple quoted spans on the target line; verify which quoted text is the target")
+    if any(keyword in target_line for keyword in QUOTE_TYPE_CAUTION_KEYWORDS):
+        cautions.append("target line contains quote-type caution words; verify actual speech vs narration/sound/text")
+    if len((dialogue or "").strip()) <= 4 and re.search(r"[咚叮砰啪哗轰咕咔铃吱呀啊嗯唔呜嘿喂]", dialogue or ""):
+        cautions.append("very short sound-like fragment; verify whether it is human speech")
+
+    return {
+        "line_num": line_num,
+        "target_line": target_line,
+        "local_start": start,
+        "local_end": end,
+        "local_lines": local_items,
+        "attribution_candidates": candidates[:8],
+        "quote_type_cautions": cautions,
+        "narrative_between": (local_structure or {}).get("narrative_between", []),
+        "no_narrative_break_from_previous": bool((local_structure or {}).get("no_narrative_break_from_previous")),
+    }
+
+
+def format_local_evidence_hint(local_evidence):
+    lines = ["[Deterministic local evidence audit - no answer labels]"]
+    target_line = local_evidence.get("target_line") or ""
+    if target_line:
+        lines.append(f"  Target raw line: L{local_evidence.get('line_num')}: {target_line[:180]}")
+    candidates = local_evidence.get("attribution_candidates") or []
+    if candidates:
+        lines.append("  Local attribution candidates detected by regex; verify in raw text before using:")
+        for item in candidates[:5]:
+            lines.append(f"    L{item.get('line')}: {item.get('speaker')} + {item.get('verb')} | {item.get('text')[:90]}")
+    else:
+        lines.append("  Local attribution candidates detected by regex: none")
+    cautions = local_evidence.get("quote_type_cautions") or []
+    if cautions:
+        lines.append("  Quote-type cautions:")
+        for caution in cautions:
+            lines.append(f"    - {caution}")
+    lines.append("  Treat alternation as weak evidence. Do not override raw attribution or quote-type evidence with memory order.")
+    return "\n".join(lines)
 
 
 class CharacterState:
@@ -1707,18 +2030,37 @@ class ShortMemAgent:
     def __init__(self, max_rounds=20):
         self.max_rounds = max_rounds
         self.history = []  # [(line_num, dialogue_text, speaker, reason, narrative_before)]
+        self.confirmed_keys = set()
         self.phase_violation = False  # set by Boss when model contradicts alternating pattern
 
-    def update(self, line_num, dialogue_text, speaker, reason="", narrative_before=""):
+    def update(self, line_num, dialogue_text, speaker, reason="", narrative_before="", confirmed=True):
         self.history.append((line_num, dialogue_text, speaker, reason, narrative_before))
+        key = (line_num, dialogue_text)
+        if confirmed:
+            self.confirmed_keys.add(key)
         if len(self.history) > self.max_rounds:
-            self.history.pop(0)
+            removed = self.history.pop(0)
+            self.confirmed_keys.discard((removed[0], removed[1]))
+
+    def _confirmed_history(self):
+        return [
+            entry for entry in self.history
+            if (entry[0], entry[1]) in self.confirmed_keys
+        ]
+
+    def _rhythm_speaker(self, speaker):
+        cleaned = validate_char_name(speaker)
+        if not cleaned or cleaned in {NON_PERSON_LABEL, "?"}:
+            return None
+        if is_generic_speaker_label(cleaned):
+            return None
+        return cleaned
 
     def detect_rapid_exchange(self, min_length=3):
         """Detect if last N entries alternate between two speakers."""
         if len(self.history) < min_length:
             return False
-        recent = [entry[2] for entry in self.history[-min_length:]]
+        recent = [self._rhythm_speaker(entry[2]) for entry in self.history[-min_length:] if self._rhythm_speaker(entry[2])]
         unique = list(dict.fromkeys(recent))
         if len(unique) != 2:
             return False
@@ -1729,10 +2071,12 @@ class ShortMemAgent:
 
     def _get_exchange_rhythm(self):
         """Detect rapid 2-person exchange pattern and return (text, next_expected)."""
-        if len(self.history) < 4:
+        confirmed = self._confirmed_history()
+        if len(confirmed) < 4:
             return None, None
-        recent = self.history[-8:]  # last 8 rounds max
-        speakers = [sp for _, _, sp, _, _ in recent]
+        recent = confirmed[-8:]  # last 8 confirmed anchors max
+        speakers = [self._rhythm_speaker(sp) for _, _, sp, _, _ in recent]
+        speakers = [sp for sp in speakers if sp]
 
         # Get the last two distinct speakers (in order of first appearance)
         seen = []
@@ -1771,18 +2115,19 @@ class ShortMemAgent:
         return None, None
 
     def get_next_expected(self):
-        """Get the expected next speaker based on alternating pattern, or None."""
+        """Get a weak expectation from confirmed anchors only, or None."""
         _, next_exp = self._get_exchange_rhythm()
-        if next_exp:
-            return next_exp
-        # Short-window fallback: just look at last 2
-        if len(self.history) >= 2:
-            last_two = set(entry[2] for entry in self.history[-2:])
-            if len(last_two) == 2:
-                speakers = list(last_two)
-                last = self.history[-1][2]
-                return speakers[1] if speakers[0] == last else speakers[0]
-        return None
+        return next_exp
+
+    def get_confirmed_summary(self):
+        """Return only independently confirmed anchors for quality-mode agents."""
+        confirmed = self._confirmed_history()
+        if not confirmed:
+            return "(No confirmed dialogue anchors yet)"
+        lines = ["[Confirmed dialogue anchors]"]
+        for line_num, dialogue, speaker, _, _ in confirmed[-8:]:
+            lines.append(f"  L{line_num}「{dialogue[:50]}」-> {speaker}")
+        return "\n".join(lines)
 
     def get_recent_speakers_hint(self):
         """Compact speaker-order hint for the Labeler."""
@@ -1800,7 +2145,7 @@ class ShortMemAgent:
             next_expected = self.get_next_expected()
             pair = f"{unique[0]} <-> {unique[1]}"
             if next_expected:
-                lines.append(f"  Possible two-person exchange: {pair}; next expected if no narrative break: {next_expected}")
+                lines.append(f"  Weak two-person exchange hint: {pair}; possible next speaker only if no narrative break and no attribution: {next_expected}")
             else:
                 lines.append(f"  Possible two-person exchange: {pair}")
         return "\n".join(lines)
@@ -1826,14 +2171,14 @@ class ShortMemAgent:
                 lines.append("")
                 lines.append(f"[ANCHOR CONSTRAINT] Last round violated the alternating pattern!")
                 lines.append(f"The last {min(len(self.history), 8)} rounds form {self._alternating_pair_name()}.")
-                lines.append(f"NEXT SPEAKER MUST BE: {next_exp} (strict alternation - do NOT repeat the previous speaker)")
-                lines.append("RULE: Only override this if the narrative clearly assigns speech to a different character.")
+                lines.append(f"Possible next speaker by weak alternation: {next_exp}")
+                lines.append("RULE: Use this only when local raw text has no narrative break and no attribution.")
 
         # Add rapid exchange warning
         if self.detect_rapid_exchange(4):
             lines.append("")
-            lines.append("RAPID EXCHANGE: Last 4 dialogues alternate between two speakers.")
-            lines.append("RULE: Narrative attribution (#1) before alternation (#3). Read 3-5 lines before target.")
+            lines.append("RAPID EXCHANGE: Last 4 concrete named dialogues alternate between two speakers.")
+            lines.append("RULE: Treat alternation as weak; narrative attribution and quote type come first.")
         return "\n".join(lines)
 
     def _alternating_pair_name(self):
@@ -1919,7 +2264,7 @@ class LabelerAgent:
 
     def label(self, line_num, dialogue, short_mem_text, fact_summary,
                char_state_text, navigation_text, scene_summary, round_log, quiet=False,
-               override_force_tool=True, recent_speakers_hint="", structure_hint=""):
+               override_force_tool=True, recent_speakers_hint="", structure_hint="", local_evidence_hint=""):
         """
         Label one dialogue's speaker. Returns (speaker, summary, reason, pec, ec).
         """
@@ -1951,12 +2296,11 @@ EVIDENCE HIERARCHY (Priority)
    - "XX回答那人说：" → XX is the speaker
    The line IMMEDIATELY before a 「dialogue」 is the most important.
 
-3. [MEDIUM] Alternating dialogue pattern
-   When two characters trade short lines in quick succession.
-   BUT: only trust the pattern when there is NO narrative paragraph between lines.
+3. [LOW] Alternating dialogue pattern
+   Useful only as a tie-breaker when two adjacent character speeches have no narrative break and no explicit attribution.
    A narrative paragraph between two lines BREAKS the alternating pattern.
 
-4. [LOW] Character availability / scene presence
+4. [LOWEST] Character availability / scene presence
    Just because a character was mentioned or recently active does NOT mean they are speaking.
 
 ========================================
@@ -2000,14 +2344,17 @@ RULE F: Non-person speech - ONLY for these cases
 - Collective shouting/group speech is NOT "非人物发声"
 
 RULE G: Alternating dialogue - specific rules
-- Two characters exchanging short lines (<20 chars each) → fast exchange likely
-- If there is NO narrative between two adjacent dialogues, the speaker likely alternates
-- But: if a narrative paragraph appears between two dialogues → the pattern RESETS
-- One character CAN speak multiple consecutive lines (not always alternating)
-- RULE: If immediate narrative contains a speech verb → that overrides ALL alternating patterns
-- RULE: If there is no speech verb AND no narrative between → use alternating + who-last-spoke
+- Alternation is WEAK evidence. It is useful only when there is no narrative break and no explicit attribution.
+- If a narrative paragraph appears between two dialogues → the pattern RESETS.
+- One character CAN speak multiple consecutive lines. Do not force alternation.
+- RULE: If immediate narrative contains a speech verb → that overrides ALL alternating patterns.
 - Use [Local dialogue structure] as a map: it tells you whether the previous dialogue is separated by narrative.
-- Use [Recent speaker order] only after checking local text; it is a clue, not proof.
+- Use [Recent speaker order] only after checking local text; it is a clue, not proof, and may contain earlier mistakes.
+
+RULE H: Report evidence strength honestly
+- evidence_basis=explicit_attribution only when local raw text directly attributes the target quote with a speech/thought verb.
+- evidence_basis=alternation only when you rely mainly on adjacent dialogue order; this is not high confidence unless raw text also supports it.
+- confidence=high only when a nearby line gives direct attribution, verified identity alias, or clear quote-type evidence.
 
 ========================================
 WORKFLOW
@@ -2030,7 +2377,7 @@ WORKFLOW
    Look for patterns such as "我叫XX", "我是XX", "名字是XX", "吾乃XX", or narration that says the descriptor is named XX.
    If found → use the revealed name. If not found → keep the stable descriptor.
 
-5. Output with <answer>, <reason>, <summary>. Optionally add <discovery> if you find new character info.
+5. Output with <answer>, <quote_type>, <evidence_basis>, <confidence>, <reason>, and <summary>. Optionally add <discovery> if you find new character info.
 
 ========================================
 OUTPUT FORMAT
@@ -2040,6 +2387,10 @@ OUTPUT FORMAT
 - One single speaker name, or "非人物发声"
 - Do NOT use "|" to separate multiple names
 - If unsure, use a descriptive label (what the novel calls them). This triggers an automated search.
+
+<quote_type>direct_speech|group_speech|embedded_quote|thought_or_narration|sound_or_text|unclear</quote_type>
+<evidence_basis>explicit_attribution|speaker_action|identity_alias|quote_type|alternation|inference|unknown</evidence_basis>
+<confidence>high|medium|low</confidence>
 
 <reason>your reasoning</reason>
 - In English or Chinese (both OK)
@@ -2071,6 +2422,8 @@ Short-term memory labels and character state are reference only.
 {navigation_text}
 
 {structure_hint}
+
+{local_evidence_hint}
 
 {short_mem_text}
 
@@ -2243,8 +2596,17 @@ If you think an auxiliary label is wrong, say so in <reason>.
         speaker = self._parse_answer(text)
         summary = self._parse_summary(text)
         reason = self._parse_reason(text)
+        round_log["labeler_evidence"] = {
+            "quote_type": self._parse_tag(text, "quote_type", "unclear"),
+            "evidence_basis": self._parse_tag(text, "evidence_basis", "unknown"),
+            "confidence": self._parse_tag(text, "confidence", "low"),
+        }
 
         return speaker, summary, reason, total_pec, total_ec, tool_rounds_used
+
+    def _parse_tag(self, text, tag, default=""):
+        match = re.search(rf"<{re.escape(tag)}>(.*?)</{re.escape(tag)}>", text or "", re.DOTALL)
+        return match.group(1).strip() if match else default
 
     def _is_garbage_speaker(self, speaker):
         """Check if a speaker name is clearly garbage (not a valid character name)."""
@@ -2319,7 +2681,7 @@ class VerifierAgent:
 
     def verify(self, line_num, dialogue, navigation_text, short_mem_text,
                scene_summary, char_state_text, labeler_speaker, round_log, quiet=False,
-               risk_reasons=None, structure_hint=""):
+               risk_reasons=None, structure_hint="", local_evidence_hint=""):
         """
         Independent verification. Returns (verdict, suggested_speaker, reason).
         verdict: "confirm" or "disagree"
@@ -2342,10 +2704,9 @@ RULES:
   (for example: a character says it, wants to say it, is about to say it, or looks as if saying it),
   keep that character as the speaker unless there is stronger contrary evidence.
 - For quote_or_letter/password_or_signal/sound_effect/thought_not_spoken, be careful: the correct label may be 非人物发声, a signal, or the attributed source rather than the nearby character
-- For rapid two-person exchanges, do not rely on alternation alone; cite the local narrative or adjacent dialogue structure
-- If there is no non-dialogue narrative between adjacent short dialogues and no explicit speech attribution,
-  high-confidence alternation may be a valid reason to disagree.
-- Be conservative. Disagree only when explicit local evidence contradicts the primary answer.
+- For rapid two-person exchanges, do not rely on alternation alone; cite the local narrative or adjacent dialogue structure.
+- Alternation may justify a risk warning, but it is not enough for high-confidence disagreement by itself.
+- Be conservative. Disagree only when explicit local evidence, verified identity alias, or clear quote-type evidence contradicts the primary answer.
 - evidence_basis=explicit_attribution only when the local text directly attributes the target quote to a source
   with a speech/thought verb such as says, asks, answers, continues, wants to say, or looks as if saying.
 - evidence_basis=speaker_action is weaker. Do not use it for a person's later movement or reaction unless it
@@ -2355,7 +2716,7 @@ RULES:
 
 OUTPUT:
 <quote_type>type</quote_type>
-<evidence_basis>explicit_attribution|speaker_action|quote_type|alternation|inference|unknown</evidence_basis>
+<evidence_basis>explicit_attribution|speaker_action|identity_alias|quote_type|alternation|inference|unknown</evidence_basis>
 <confidence>high|medium|low</confidence>
 <verdict>confirm</verdict> or <verdict>disagree</verdict>
 <suggested_speaker>name</suggested_speaker>
@@ -2379,6 +2740,8 @@ Original text navigation:
 {compact_navigation}
 
 {structure_hint}
+
+{local_evidence_hint}
 
 {compact_short_mem}
 
@@ -2478,12 +2841,14 @@ Risk reasons:
 
 {structure_hint}
 
+{local_evidence_hint}
+
 [Tool result]
 {compact_text(chr(10).join(tool_results), 12000, keep="tail")}
 
 Output exactly:
 <quote_type>type</quote_type>
-<evidence_basis>explicit_attribution|speaker_action|quote_type|alternation|inference|unknown</evidence_basis>
+<evidence_basis>explicit_attribution|speaker_action|identity_alias|quote_type|alternation|inference|unknown</evidence_basis>
 <confidence>high|medium|low</confidence>
 <verdict>confirm</verdict> or <verdict>disagree</verdict>
 <suggested_speaker>name</suggested_speaker>
@@ -2536,15 +2901,1119 @@ Output exactly:
 
 
 # ============================================================
+# Quality Audit - baseline-preserving, scene-level SenseNova review
+# ============================================================
+
+class QualityAudit:
+    """Audit a legacy candidate from independent views without exposing rationales across roles."""
+
+    QUOTE_KINDS = {"person", "group", "non_person", "unclear"}
+    QUOTE_TYPES = {
+        "direct_speech", "group_speech", "embedded_quote",
+        "thought_or_narration", "sound_or_text", "unclear",
+    }
+    EVIDENCE_BASES = {
+        "explicit_attribution", "speaker_action", "identity_alias",
+        "quote_type", "alternation", "inference", "unknown",
+    }
+    NON_SPEECH_REASON_PHRASES = (
+        "not actual speech", "not spoken", "not as spoken", "not speech", "not dialogue",
+        "not actual spoken", "no character utters", "nobody utters", "not a spoken line",
+        "不是对话", "并非对话", "非对话", "不是人物说", "并非人物说", "无人说出",
+        "没有角色说出", "非实际言语", "并非实际发言", "不是台词", "并非台词",
+        "叙述性文字", "叙述性描写",
+    )
+
+    def __init__(self, dialogue_radius=None):
+        radius = QUALITY_SCENE_RADIUS if dialogue_radius is None else dialogue_radius
+        self.dialogue_radius = max(4, int(radius))
+        self.model_call_count = 0
+
+    @staticmethod
+    def _same_speaker(left, right):
+        return bool(left and right and (left == right or left in right or right in left))
+
+    @staticmethod
+    def _preferred_consensus_label(labels):
+        labels = [validate_char_name(label) for label in labels]
+        labels = [label for label in labels if label and is_valid_final_speaker(label)]
+        if not labels:
+            return ""
+        for candidate in labels:
+            if all(QualityAudit._same_speaker(candidate, other) for other in labels):
+                return max(labels, key=len)
+        return ""
+
+    @classmethod
+    def _speaker_vote_consensus(cls, labels, minimum_support):
+        cleaned_labels = [validate_char_name(label) for label in labels]
+        cleaned_labels = [label for label in cleaned_labels if label and is_valid_final_speaker(label)]
+        best_label = ""
+        best_support = 0
+        for candidate in cleaned_labels:
+            matching = [label for label in cleaned_labels if cls._same_speaker(candidate, label)]
+            support = len(matching)
+            preferred = max(matching, key=len) if matching else candidate
+            if support > best_support or (support == best_support and len(preferred) > len(best_label)):
+                best_label = preferred
+                best_support = support
+        if best_support < minimum_support:
+            return "", best_support
+        return best_label, best_support
+
+    def _parse_card(self, text):
+        raw_speaker = (
+            get_ensemble_tag(text, "speaker")
+            or get_ensemble_tag(text, "target_speaker")
+            or get_ensemble_tag(text, "preferred_speaker")
+        )
+        speaker = validate_char_name(raw_speaker) if raw_speaker else ""
+        citations = parse_line_citations(get_ensemble_tag(text, "citations"))
+        return {
+            "speaker": speaker or "",
+            "voice_kind": get_ensemble_tag(text, "voice_kind", "unclear").strip().lower(),
+            "quote_type": get_ensemble_tag(text, "quote_type", "unclear").strip().lower(),
+            "evidence_basis": get_ensemble_tag(text, "evidence_basis", "unknown").strip().lower(),
+            "confidence": get_ensemble_tag(text, "confidence", "low").strip().lower(),
+            "citations": citations,
+            "reason": get_ensemble_tag(text, "reason")[:500],
+            "raw": text,
+        }
+
+    @staticmethod
+    def _card_from_tool_args(args, raw_text=""):
+        raw_speaker = (
+            args.get("speaker")
+            or args.get("target_speaker")
+            or args.get("preferred_speaker")
+            or ""
+        )
+        speaker = validate_char_name(raw_speaker) if raw_speaker else ""
+        citations = args.get("citations") or []
+        if isinstance(citations, (str, int)):
+            citations = parse_line_citations(str(citations))
+        else:
+            normalized = []
+            for item in citations:
+                try:
+                    normalized.append(int(item))
+                except (TypeError, ValueError):
+                    normalized.extend(parse_line_citations(str(item)))
+            citations = list(dict.fromkeys(normalized))
+        return {
+            "speaker": speaker or "",
+            "voice_kind": str(args.get("voice_kind") or "unclear").strip().lower(),
+            "quote_type": str(args.get("quote_type") or "unclear").strip().lower(),
+            "evidence_basis": str(args.get("evidence_basis") or "unknown").strip().lower(),
+            "confidence": str(args.get("confidence") or "low").strip().lower(),
+            "citations": citations,
+            "reason": str(args.get("reason") or "")[:500],
+            "raw": raw_text,
+        }
+
+    def _card_is_valid(self, card, packet, card_type):
+        if not citations_are_local(card.get("citations", []), packet):
+            return False
+        if card_type == "quote":
+            return (
+                card.get("voice_kind") in self.QUOTE_KINDS
+                and card.get("quote_type") in self.QUOTE_TYPES
+            )
+        return (
+            is_valid_final_speaker(card.get("speaker"))
+            and card.get("evidence_basis") in self.EVIDENCE_BASES
+        )
+
+    @classmethod
+    def _normalize_card_consistency(cls, card, card_type):
+        reason = (card.get("reason") or "").lower()
+        if not any(phrase in reason for phrase in cls.NON_SPEECH_REASON_PHRASES):
+            return card
+        normalized = dict(card)
+        if card_type == "quote":
+            normalized["voice_kind"] = "non_person"
+            if normalized.get("quote_type") in {"unclear", "direct_speech", "group_speech"}:
+                normalized["quote_type"] = "thought_or_narration"
+        else:
+            normalized["speaker"] = NON_PERSON_LABEL
+            normalized["evidence_basis"] = "quote_type"
+        normalized["consistency_normalized"] = True
+        return normalized
+
+    def _run_xml_agent(self, agent_name, role, system_prompt, user_content,
+                       round_log, packet, card_type):
+        total_pec = 0
+        total_ec = 0
+        last_card = {}
+        last_text = ""
+        for attempt in range(1, QUALITY_AUDIT_RETRIES + 1):
+            correction = ""
+            if attempt > 1:
+                correction = (
+                    "\n\nYour previous response was unusable. Re-read the raw text and produce a fresh "
+                    "decision. Copy Chinese names exactly from the source. Include at least one local "
+                    "L<number> citation. Do not output English names, unknown, unclear as a speaker, or prose "
+                    "before the required submit_review tool call."
+                )
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content + correction},
+            ]
+            output_tool = json.loads(json.dumps(QUALITY_OUTPUT_TOOL))
+            if card_type == "quote":
+                required = ["quote_type", "voice_kind", "confidence", "citations", "reason"]
+            else:
+                required = ["speaker", "evidence_basis", "confidence", "citations", "reason"]
+            output_tool["function"]["parameters"]["required"] = required
+            text, pec, ec, tool_calls = call_ollama(
+                messages,
+                tools=[output_tool],
+                label=f"{agent_name}-A{attempt}",
+                request_timeout=QUALITY_REQUEST_TIMEOUT,
+                tool_choice="required",
+            )
+            self.model_call_count += 1
+            total_pec += pec
+            total_ec += ec
+            tool_args = {}
+            for tool_call in tool_calls or []:
+                function = tool_call.get("function", {}) or {}
+                if function.get("name") != "submit_review":
+                    continue
+                parsed_args, parse_error = parse_tool_arguments(
+                    "submit_review", function.get("arguments", "{}")
+                )
+                if parsed_args and not parse_error:
+                    tool_args = parsed_args
+                    break
+                if parsed_args:
+                    tool_args = parsed_args
+            card = self._card_from_tool_args(tool_args, text) if tool_args else self._parse_card(text)
+            card = self._normalize_card_consistency(card, card_type)
+            valid = self._card_is_valid(card, packet, card_type)
+            card["valid"] = valid
+            log_agent(
+                round_log,
+                agent_name if attempt == 1 else f"{agent_name}Retry{attempt}",
+                role,
+                messages,
+                text,
+                pec,
+                ec,
+                tool_calls_list=(
+                    [{"function": "submit_review", "arguments": tool_args}]
+                    if tool_args else None
+                ),
+            )
+            last_card = card
+            last_text = text
+            if valid:
+                break
+        last_card["raw"] = last_text
+        return last_card, total_pec, total_ec
+
+    @staticmethod
+    def _quote_output_format():
+        return (
+            "Call submit_review immediately. Set voice_kind, quote_type, confidence, integer citations, "
+            "and a brief reason. Do not write analysis before the tool call."
+        )
+
+    @staticmethod
+    def _speaker_output_format():
+        return (
+            "Call submit_review immediately. Set speaker to one Chinese source label or 非人物发声, then "
+            "set evidence_basis, confidence, integer citations, and a brief reason. Do not write analysis "
+            "before the tool call."
+        )
+
+    def _select_decision(self, baseline, baseline_evidence, quote_cards,
+                         attribution_cards, final_card, packet):
+        baseline = validate_char_name(baseline) or baseline
+        valid_quotes = [card for card in quote_cards if card.get("valid")]
+        valid_attributions = [card for card in attribution_cards if card.get("valid")]
+        quote_counts = Counter(card.get("voice_kind") for card in valid_quotes)
+        attribution_labels = [card.get("speaker") for card in valid_attributions]
+        minimum_scene_support = max(3, (len(attribution_cards) * 4 + 4) // 5)
+        attribution_consensus, attribution_support = self._speaker_vote_consensus(
+            attribution_labels,
+            minimum_scene_support,
+        )
+        attribution_plurality, attribution_plurality_support = self._speaker_vote_consensus(
+            attribution_labels,
+            1,
+        )
+
+        final_speaker = final_card.get("speaker") if final_card.get("valid") else ""
+        final_panel_support = int(final_card.get("panel_support") or 0)
+        final_panel_size = int(final_card.get("panel_size") or 1)
+        final_panel_speakers = list(final_card.get("panel_speakers") or [])
+        scene_support_for_final = sum(
+            self._same_speaker(final_speaker, label) for label in attribution_labels
+        ) if final_speaker else 0
+        attribution_all_explicit = bool(valid_attributions) and all(
+            card.get("evidence_basis") == "explicit_attribution" for card in valid_attributions
+        )
+        final_support_for_attribution_consensus = sum(
+            self._same_speaker(attribution_consensus, label)
+            for label in final_panel_speakers
+        ) if attribution_consensus else 0
+        source = "baseline-retained"
+        speaker = baseline
+
+        nonperson_support = quote_counts.get("non_person", 0)
+        attribution_nonperson = sum(
+            validate_char_name(label) == NON_PERSON_LABEL for label in attribution_labels
+        )
+        person_support = quote_counts.get("person", 0) + quote_counts.get("group", 0)
+
+        if (
+            final_speaker == NON_PERSON_LABEL
+            and nonperson_support >= 2
+            and attribution_nonperson >= max(2, (len(attribution_cards) + 1) // 2)
+        ):
+            speaker = NON_PERSON_LABEL
+            source = "audited-non-person"
+        elif (
+            baseline == NON_PERSON_LABEL
+            and final_speaker
+            and final_speaker != NON_PERSON_LABEL
+            and person_support == len(quote_cards)
+            and attribution_consensus
+            and self._same_speaker(final_speaker, attribution_consensus)
+        ):
+            speaker = attribution_consensus
+            source = "audited-person-speech"
+        elif (
+            baseline == NON_PERSON_LABEL
+            and attribution_consensus
+            and attribution_consensus != NON_PERSON_LABEL
+            and attribution_support == len(attribution_cards)
+            and len(attribution_labels) == len(attribution_cards)
+            and attribution_all_explicit
+            and final_support_for_attribution_consensus >= 1
+        ):
+            speaker = attribution_consensus
+            source = "explicit-local-person-restoration"
+        elif (
+            attribution_consensus
+            and attribution_support >= 4
+            and len(attribution_labels) >= 4
+            and attribution_consensus != NON_PERSON_LABEL
+            and baseline != NON_PERSON_LABEL
+            and not self._same_speaker(baseline, attribution_consensus)
+        ):
+            speaker = attribution_consensus
+            source = "strong-local-panel-correction"
+        elif (
+            attribution_consensus
+            and final_speaker
+            and self._same_speaker(final_speaker, attribution_consensus)
+            and not self._same_speaker(baseline, attribution_consensus)
+        ):
+            speaker = attribution_consensus
+            source = "audited-speaker-correction"
+        elif (
+            final_speaker
+            and not self._same_speaker(final_speaker, baseline)
+            and final_panel_support >= 2
+            and final_panel_size >= 3
+            and scene_support_for_final >= 3
+        ):
+            speaker = final_speaker
+            source = "joint-panel-correction"
+        elif not is_valid_final_speaker(baseline) and final_speaker:
+            speaker = final_speaker
+            source = "invalid-baseline-replacement"
+
+        if not is_valid_final_speaker(speaker):
+            if is_valid_final_speaker(baseline):
+                speaker = baseline
+                source = "invalid-audit-fallback"
+            else:
+                speaker = "?"
+                source = "unresolved"
+
+        all_high = bool(valid_attributions) and all(
+            card.get("confidence") == "high" for card in valid_attributions
+        )
+        all_explicit = bool(valid_attributions) and all(
+            card.get("evidence_basis") == "explicit_attribution" for card in valid_attributions
+        )
+        final_high = final_card.get("confidence") == "high"
+        confirmed_anchor = bool(
+            source == "audited-speaker-correction"
+            and attribution_consensus
+            and all_high
+            and all_explicit
+            and final_high
+            and final_card.get("evidence_basis") == "explicit_attribution"
+        )
+        if source == "audited-non-person":
+            confirmed_anchor = bool(
+                nonperson_support == len(quote_cards)
+                and attribution_nonperson == len(attribution_cards)
+                and final_high
+            )
+
+        return {
+            "speaker": speaker,
+            "baseline_speaker": baseline,
+            "baseline_changed": not self._same_speaker(speaker, baseline),
+            "selection_source": source,
+            "confirmed_anchor": confirmed_anchor,
+            "quote_votes": dict(quote_counts),
+            "attribution_consensus": attribution_consensus,
+            "attribution_support": attribution_support,
+            "attribution_valid_votes": len(attribution_labels),
+            "attribution_plurality": attribution_plurality,
+            "attribution_plurality_support": attribution_plurality_support,
+            "final_speaker": final_speaker,
+            "final_panel_support": final_panel_support,
+            "final_panel_size": final_panel_size,
+            "scene_support_for_final": scene_support_for_final,
+            "final_support_for_attribution_consensus": final_support_for_attribution_consensus,
+            "quote_type": final_card.get("quote_type", baseline_evidence.get("quote_type", "unclear")),
+            "evidence_basis": final_card.get("evidence_basis", "unknown"),
+            "confidence": final_card.get("confidence", "low"),
+            "citations": final_card.get("citations", []),
+        }
+
+    @classmethod
+    def _apply_split_neighbor_result(cls, decision, baseline, plurality,
+                                     previous_cards, next_cards):
+        updated = dict(decision)
+        valid_previous = [card for card in previous_cards if card.get("valid")]
+        valid_next = [card for card in next_cards if card.get("valid")]
+        previous_consensus, previous_support = cls._speaker_vote_consensus(
+            [card.get("speaker") for card in valid_previous],
+            2,
+        )
+        next_consensus, next_support = cls._speaker_vote_consensus(
+            [card.get("speaker") for card in valid_next],
+            2,
+        )
+        updated["previous_neighbor_speaker"] = previous_consensus
+        updated["previous_neighbor_support"] = previous_support
+        updated["next_neighbor_speaker"] = next_consensus
+        updated["next_neighbor_support"] = next_support
+        if (
+            previous_support >= 2
+            and next_support >= 2
+            and cls._same_speaker(previous_consensus, baseline)
+            and cls._same_speaker(next_consensus, baseline)
+            and plurality
+            and not cls._same_speaker(plurality, baseline)
+        ):
+            updated["speaker"] = plurality
+            updated["baseline_changed"] = True
+            updated["selection_source"] = "split-neighbor-anchor-correction"
+            updated["confirmed_anchor"] = False
+        return updated
+
+    def decide(self, novel_lines, dialogue_list, line_num, dialogue, baseline,
+               baseline_evidence, round_log):
+        calls_before = self.model_call_count
+        packet = build_dialogue_packet(
+            novel_lines,
+            dialogue_list,
+            line_num,
+            dialogue,
+            dialogue_radius=self.dialogue_radius,
+            raw_padding=8,
+        )
+        packet_text = format_dialogue_packet(packet, max_raw_chars=22000)
+        local_packet = build_dialogue_packet(
+            novel_lines,
+            dialogue_list,
+            line_num,
+            dialogue,
+            dialogue_radius=min(5, self.dialogue_radius),
+            raw_padding=6,
+        )
+        local_packet_text = format_dialogue_packet(local_packet, max_raw_chars=12000)
+        target = packet["target"]
+        quote_common = (
+            "The TARGET is one exact quoted occurrence, not every quotation on its raw line. "
+            "Classify whether a person actually utters that exact span. Embedded wording, labels, "
+            "writing, remembered wording, facial expressions, eye messages, and object sounds are not "
+            "automatically character speech. A human-made sigh or cry is person speech when the raw text "
+            "binds the sound to that person. Cite only supplied raw lines.\n\n"
+        )
+        quote_prompts = [
+            (
+                "QuoteSyntaxAudit",
+                "Audit the grammatical container of the TARGET quote. Ignore character identity and topic. "
+                "Determine whether the typography is actual utterance or quotation embedded in narration. ",
+            ),
+            (
+                "QuoteAdversarialAudit",
+                "Assume a nearby character assignment may be a false positive. Search specifically for wording "
+                "that makes the TARGET thought, text, metaphorical message, or sound rather than speech. ",
+            ),
+            (
+                "QuoteSceneAudit",
+                "Read the surrounding scene and decide whether anyone in the scene actually produces the exact "
+                "TARGET span. Do not identify the speaker; classify voice kind only. ",
+            ),
+        ]
+        quote_cards = []
+        total_pec = 0
+        total_ec = 0
+        for agent_name, instruction in quote_prompts:
+            card, pec, ec = self._run_xml_agent(
+                agent_name,
+                "independent_quote_audit",
+                instruction + quote_common + self._quote_output_format(),
+                local_packet_text,
+                round_log,
+                local_packet,
+                "quote",
+            )
+            quote_cards.append(card)
+            total_pec += pec
+            total_ec += ec
+
+        local_solver_instruction = (
+            "Solve the target-centered block from its first turn to its last turn. Assign every displayed turn "
+            "chronologically before returning only the TARGET speaker. Check immediate narrative on both sides. "
+            "When the turns on both sides belong to one participant, explicitly test TARGET as the intervening "
+            "reply from another participant."
+        )
+        attribution_prompts = [
+            (f"LocalChronologyAudit{index}", local_solver_instruction, local_packet_text, local_packet)
+            for index in range(1, 6)
+        ]
+        speaker_common = (
+            " Use only this novel's raw text. Copy a Chinese name or stable unnamed role exactly from the source; "
+            "never translate or romanize it. A mentioned person or addressee is not necessarily the speaker. "
+            "A line discussing a character's identity, occupation, species, belongings, or interests is not evidence "
+            "that the character speaks it. Do not use outside knowledge or novel-specific assumptions. "
+            + self._speaker_output_format()
+        )
+        attribution_cards = []
+        for agent_name, instruction, content, evidence_packet in attribution_prompts:
+            card, pec, ec = self._run_xml_agent(
+                agent_name,
+                "independent_scene_attribution",
+                instruction + speaker_common,
+                content,
+                round_log,
+                evidence_packet,
+                "speaker",
+            )
+            attribution_cards.append(card)
+            total_pec += pec
+            total_ec += ec
+
+        candidate_labels = []
+        for candidate in [baseline] + [card.get("speaker") for card in attribution_cards]:
+            cleaned = validate_char_name(candidate)
+            if cleaned and is_valid_final_speaker(cleaned) and not any(
+                self._same_speaker(cleaned, existing) for existing in candidate_labels
+            ):
+                candidate_labels.append(cleaned)
+        candidate_labels.sort(key=lambda value: (sum(ord(ch) for ch in value) + line_num) % 997)
+        valid_attribution_labels = [
+            card.get("speaker") for card in attribution_cards if card.get("valid")
+        ]
+        candidate_support = {
+            label: sum(self._same_speaker(label, vote) for vote in valid_attribution_labels)
+            for label in candidate_labels
+        }
+        quote_vote_summary = Counter(
+            card.get("voice_kind") for card in quote_cards if card.get("valid")
+        )
+        final_user = (
+            f"{local_packet_text}\n\n[Anonymous candidate labels; order carries no meaning]\n"
+            + "\n".join(
+                f"  Candidate {idx + 1}: {label} | independent scene support "
+                f"{candidate_support.get(label, 0)}/{len(attribution_cards)}"
+                for idx, label in enumerate(candidate_labels)
+            )
+            + f"\n\n[Independent quote-kind vote counts]\n{dict(quote_vote_summary)}"
+        )
+        final_common = (
+            " Re-read the raw scene yourself. Candidate labels are hypotheses and no prior reasoning is available. "
+            "If the exact target is narration, embedded wording, written text, or an object/ambient sound that "
+            "nobody utters, select 非人物发声. Copy Chinese labels from the source and do not invent or romanize "
+            "names. Topic, persona, species, occupation, presumed pronoun habits, and characteristic vocabulary "
+            "are invalid evidence unless the raw text independently binds the exact target quote to that speaker. "
+            "Cite target-bound raw lines. " + self._speaker_output_format()
+        )
+        final_prompts = [
+            (
+                "FinalEvidenceJudge",
+                "Judge by exact grammatical quote binding and immediate narrative on both sides.",
+            ),
+            (
+                "FinalTurnSequenceJudge",
+                "Assign every displayed turn chronologically, including both neighbors of TARGET, before selecting "
+                "TARGET. Do not infer who uses a pronoun from outside knowledge; derive it from this raw block.",
+            ),
+            (
+                "FinalCandidateChallengeJudge",
+                "Find the candidate with the strongest independent scene support, then actively try to falsify it. "
+                "Reject it only for a direct raw-text contradiction; a topic or presumed speech habit is not one.",
+            ),
+        ]
+        final_cards = []
+        for agent_name, instruction in final_prompts:
+            card, pec, ec = self._run_xml_agent(
+                agent_name,
+                "raw_evidence_final_judge",
+                instruction + final_common,
+                final_user,
+                round_log,
+                local_packet,
+                "speaker",
+            )
+            final_cards.append(card)
+            total_pec += pec
+            total_ec += ec
+        valid_final_cards = [card for card in final_cards if card.get("valid")]
+        final_consensus, final_support = self._speaker_vote_consensus(
+            [card.get("speaker") for card in valid_final_cards],
+            2,
+        )
+        if final_consensus:
+            final_card = next(
+                dict(card) for card in valid_final_cards
+                if self._same_speaker(final_consensus, card.get("speaker"))
+            )
+            final_card["speaker"] = final_consensus
+            final_card["valid"] = True
+        else:
+            final_card = {
+                "speaker": "",
+                "quote_type": "unclear",
+                "evidence_basis": "unknown",
+                "confidence": "low",
+                "citations": [],
+                "reason": "final judge panel did not reach unanimous agreement",
+                "valid": False,
+            }
+        final_card["panel_support"] = final_support
+        final_card["panel_size"] = len(final_cards)
+        final_card["panel_speakers"] = [
+            card.get("speaker") for card in valid_final_cards if card.get("speaker")
+        ]
+
+        decision = self._select_decision(
+            baseline,
+            baseline_evidence or {},
+            quote_cards,
+            attribution_cards,
+            final_card,
+            packet,
+        )
+        previous_neighbor_cards = []
+        next_neighbor_cards = []
+        baseline_clean = validate_char_name(baseline) or baseline
+        plurality = decision.get("attribution_plurality") or ""
+        local_target_index = next(
+            index for index, turn in enumerate(local_packet["turns"])
+            if turn.get("is_target")
+        )
+        if (
+            decision.get("selection_source") == "baseline-retained"
+            and decision.get("attribution_plurality_support", 0) >= 3
+            and is_valid_final_speaker(baseline_clean)
+            and is_valid_final_speaker(plurality)
+            and baseline_clean != NON_PERSON_LABEL
+            and plurality != NON_PERSON_LABEL
+            and not self._same_speaker(baseline_clean, plurality)
+            and 0 < local_target_index < len(local_packet["turns"]) - 1
+        ):
+            neighbor_turns = {
+                "Previous": local_packet["turns"][local_target_index - 1],
+                "Next": local_packet["turns"][local_target_index + 1],
+            }
+            for side, turn in neighbor_turns.items():
+                neighbor_system = (
+                    f"Identify only the {side.upper()} neighboring dialogue turn {turn['id']} at "
+                    f"L{turn['line']}: {turn['text']}. Do not identify or discuss the TARGET speaker. "
+                    "Use that neighbor turn's own immediate narrative attribution and actions. Do not use topic, "
+                    "persona, species, occupation, or presumed pronoun habits. "
+                    + self._speaker_output_format()
+                )
+                destination = previous_neighbor_cards if side == "Previous" else next_neighbor_cards
+                for index in range(1, 4):
+                    card, pec, ec = self._run_xml_agent(
+                        f"{side}NeighborAudit{index}",
+                        "single_neighbor_anchor_audit",
+                        neighbor_system,
+                        local_packet_text,
+                        round_log,
+                        local_packet,
+                        "speaker",
+                    )
+                    destination.append(card)
+                    total_pec += pec
+                    total_ec += ec
+            decision = self._apply_split_neighbor_result(
+                decision,
+                baseline_clean,
+                plurality,
+                previous_neighbor_cards,
+                next_neighbor_cards,
+            )
+        metadata = {
+            "decision": decision,
+            "packet": {
+                "raw_start": packet["raw_start"],
+                "raw_end": packet["raw_end"],
+                "target_dialogue_index": target["dialogue_index"],
+                "turn_count": len(packet["turns"]),
+            },
+            "quote_reviews": [
+                {key: value for key, value in card.items() if key != "raw"}
+                for card in quote_cards
+            ],
+            "attribution_reviews": [
+                {key: value for key, value in card.items() if key != "raw"}
+                for card in attribution_cards
+            ],
+            "final_reviews": [
+                {key: value for key, value in card.items() if key != "raw"}
+                for card in final_cards
+            ],
+            "final_review": {key: value for key, value in final_card.items() if key != "raw"},
+            "previous_neighbor_reviews": [
+                {key: value for key, value in card.items() if key != "raw"}
+                for card in previous_neighbor_cards
+            ],
+            "next_neighbor_reviews": [
+                {key: value for key, value in card.items() if key != "raw"}
+                for card in next_neighbor_cards
+            ],
+            "model_calls": self.model_call_count - calls_before,
+        }
+        reason = (
+            f"quality_audit={decision['selection_source']}; baseline={decision['baseline_speaker']}; "
+            f"quote_votes={decision['quote_votes']}; scene_consensus={decision['attribution_consensus'] or 'none'}; "
+            f"final={decision['final_speaker'] or 'invalid'}; "
+            f"neighbors={decision.get('previous_neighbor_speaker') or 'none'}/"
+            f"{decision.get('next_neighbor_speaker') or 'none'}"
+        )
+        summary = f"{decision['speaker']} | {dialogue[:80]}"
+        return decision["speaker"], summary, reason, total_pec, total_ec, metadata
+
+
+# ============================================================
+# Quality Ensemble - blind, block-level attribution
+# ============================================================
+
+class QualityEnsemble:
+    """Run independent raw-text reviews before selecting a speaker.
+
+    It deliberately accepts no provisional speaker history. Every agent receives
+    the same bounded, line-numbered raw packet and makes a novel-agnostic claim.
+    """
+
+    def __init__(self, dialogue_radius=None):
+        radius = DIALOGUE_BLOCK_RADIUS if dialogue_radius is None else dialogue_radius
+        self.dialogue_radius = max(1, int(radius))
+        self.model_call_count = 0
+
+    def _run_agent(self, agent_name, role, system_prompt, user_content, round_log, required_tags=()):
+        if required_tags:
+            user_content += (
+                "\n\nFORMAT REQUIREMENT: Call submit_review with the required structured fields. "
+                "Do not write analysis before the tool call. Required fields: "
+                + ", ".join(required_tags)
+            )
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ]
+        output_tool = self._quality_output_tool(required_tags)
+        model_text, pec, ec, tool_calls = call_ollama(
+            messages,
+            tools=[output_tool],
+            label=agent_name,
+            request_timeout=QUALITY_REQUEST_TIMEOUT,
+            tool_choice={"type": "function", "function": {"name": "submit_review"}},
+        )
+        self.model_call_count += 1
+        tool_args = self._extract_quality_tool_args(tool_calls)
+        log_agent(
+            round_log,
+            agent_name,
+            role,
+            messages,
+            model_text,
+            pec,
+            ec,
+            tool_calls_list=[{"function": "submit_review", "arguments": tool_args}] if tool_args else None,
+        )
+        if tool_args:
+            return self._tool_args_to_tag_text(tool_args), pec, ec
+
+        if required_tags:
+            repair_messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a strict structured-output formatter. Extract one final conclusion from "
+                        "the analyst response below. Call submit_review only. Do not invent evidence."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"Required fields: {', '.join(required_tags)}\n\n"
+                        f"Analyst response:\n{compact_text(model_text, 9000, keep='tail')}"
+                    ),
+                },
+            ]
+            repaired_text, repair_pec, repair_ec, repair_tool_calls = call_ollama(
+                repair_messages,
+                tools=[output_tool],
+                label=f"{agent_name}FormatRepair",
+                request_timeout=QUALITY_REQUEST_TIMEOUT,
+                tool_choice={"type": "function", "function": {"name": "submit_review"}},
+            )
+            self.model_call_count += 1
+            repaired_args = self._extract_quality_tool_args(repair_tool_calls)
+            log_agent(
+                round_log,
+                f"{agent_name}FormatRepair",
+                "structured_output_repair",
+                repair_messages,
+                repaired_text,
+                repair_pec,
+                repair_ec,
+                tool_calls_list=[{"function": "submit_review", "arguments": repaired_args}] if repaired_args else None,
+            )
+            if repaired_args:
+                return self._tool_args_to_tag_text(repaired_args), pec + repair_pec, ec + repair_ec
+            return repaired_text, pec + repair_pec, ec + repair_ec
+        return model_text, pec, ec
+
+    @staticmethod
+    def _quality_output_tool(required_tags):
+        tool = json.loads(json.dumps(QUALITY_OUTPUT_TOOL))
+        tool["function"]["parameters"]["required"] = list(required_tags)
+        return tool
+
+    @staticmethod
+    def _extract_quality_tool_args(tool_calls):
+        for tool_call in tool_calls or []:
+            function = tool_call.get("function", {}) or {}
+            if function.get("name") != "submit_review":
+                continue
+            args, parse_error = parse_tool_arguments("submit_review", function.get("arguments", "{}"))
+            if not parse_error or args:
+                return args
+        return {}
+
+    @staticmethod
+    def _tool_args_to_tag_text(args):
+        fields = (
+            "speaker", "target_speaker", "preferred_speaker", "block_assignments",
+            "quote_type", "voice_kind", "evidence_basis", "confidence", "reason",
+        )
+        rendered = []
+        for field in fields:
+            value = args.get(field)
+            if value is not None and str(value).strip():
+                rendered.append(f"<{field}>{value}</{field}>")
+        citations = args.get("citations") or []
+        if isinstance(citations, (str, int)):
+            citations = [citations]
+        citation_text = ", ".join(f"L{item}" for item in citations)
+        if citation_text:
+            rendered.append(f"<citations>{citation_text}</citations>")
+        return "\n".join(rendered)
+
+    def _parse_card(self, text, speaker_tags=("speaker",)):
+        raw_speaker = ""
+        for tag in speaker_tags:
+            raw_speaker = get_ensemble_tag(text, tag)
+            if raw_speaker:
+                break
+        speaker = validate_char_name(raw_speaker) if raw_speaker else ""
+        if not speaker and raw_speaker.strip() == "?":
+            speaker = "?"
+        citations_text = get_ensemble_tag(text, "citations")
+        return {
+            "speaker": speaker,
+            "quote_type": get_ensemble_tag(text, "quote_type", "unclear").strip().lower(),
+            "voice_kind": get_ensemble_tag(text, "voice_kind", "unclear").strip().lower(),
+            "evidence_basis": get_ensemble_tag(text, "evidence_basis", "unknown").strip().lower(),
+            "confidence": get_ensemble_tag(text, "confidence", "low").strip().lower(),
+            "citations": parse_line_citations(citations_text),
+            "reason": get_ensemble_tag(text, "reason")[:500],
+            "raw": text,
+        }
+
+    @staticmethod
+    def _same_speaker(left, right):
+        return bool(left and right and (left == right or left in right or right in left))
+
+    @staticmethod
+    def _confidence_is_high(value):
+        return (value or "").strip().lower() in {"high", "certain"}
+
+    def _card_has_local_citation(self, card, packet):
+        return citations_are_local(card.get("citations", []), packet)
+
+    def _select_decision(self, quote_card, local_card, block_card, arbiter_card, packet):
+        local_speaker = local_card.get("speaker", "")
+        block_speaker = block_card.get("speaker", "")
+        consensus = local_speaker if self._same_speaker(local_speaker, block_speaker) else ""
+        consensus_cited = bool(
+            consensus
+            and self._card_has_local_citation(local_card, packet)
+            and self._card_has_local_citation(block_card, packet)
+        )
+        arbiter_speaker = arbiter_card.get("speaker", "")
+        arbiter_cited = self._card_has_local_citation(arbiter_card, packet)
+        arbiter_strong = (
+            arbiter_cited
+            and self._confidence_is_high(arbiter_card.get("confidence"))
+            and arbiter_card.get("evidence_basis") in {"explicit_attribution", "quote_type"}
+        )
+
+        source = "arbiter"
+        if consensus and not arbiter_speaker:
+            speaker = consensus
+            source = "blind-consensus-no-arbiter-answer"
+        elif consensus and not self._same_speaker(consensus, arbiter_speaker) and not arbiter_strong:
+            speaker = consensus
+            source = "blind-consensus-over-weak-arbiter"
+        elif arbiter_speaker:
+            speaker = arbiter_speaker
+        elif consensus:
+            speaker = consensus
+            source = "blind-consensus"
+        elif local_speaker:
+            speaker = local_speaker
+            source = "local-fallback"
+        elif block_speaker:
+            speaker = block_speaker
+            source = "block-fallback"
+        elif quote_card.get("voice_kind") == "non_person":
+            speaker = NON_PERSON_LABEL
+            source = "quote-type-fallback"
+        else:
+            speaker = "?"
+            source = "unresolved"
+
+        if speaker == NON_PERSON_LABEL and quote_card.get("voice_kind") not in {"non_person", "unclear"}:
+            if consensus and consensus != NON_PERSON_LABEL:
+                speaker = consensus
+                source = "blind-consensus-over-unverified-non-person"
+
+        final_basis = arbiter_card.get("evidence_basis", "unknown")
+        final_confidence = arbiter_card.get("confidence", "low")
+        final_quote_type = arbiter_card.get("quote_type", "unclear")
+        if source.startswith("blind-consensus"):
+            final_basis = "blind_consensus"
+            final_confidence = "high" if consensus_cited else "medium"
+            final_quote_type = quote_card.get("quote_type") or block_card.get("quote_type") or "unclear"
+
+        confirmed_anchor = bool(
+            arbiter_cited
+            and self._confidence_is_high(final_confidence)
+            and final_basis in {"explicit_attribution", "quote_type"}
+        )
+        if consensus_cited and self._same_speaker(speaker, consensus):
+            confirmed_anchor = True
+
+        citations = arbiter_card.get("citations", [])
+        if not citations and consensus_cited:
+            citations = sorted(set(local_card.get("citations", []) + block_card.get("citations", [])))
+        return {
+            "speaker": speaker,
+            "quote_type": final_quote_type,
+            "evidence_basis": final_basis,
+            "confidence": final_confidence,
+            "citations": citations,
+            "confirmed_anchor": confirmed_anchor,
+            "selection_source": source,
+            "blind_agreement": bool(consensus),
+        }
+
+    def decide(self, novel_lines, dialogue_list, line_num, dialogue, confirmed_anchors, round_log):
+        """Return a quality-mode decision without consuming provisional labels."""
+        calls_before = self.model_call_count
+        packet = build_dialogue_packet(
+            novel_lines,
+            dialogue_list,
+            line_num,
+            dialogue,
+            dialogue_radius=self.dialogue_radius,
+        )
+        packet_text = format_dialogue_packet(packet)
+        anchor_text = compact_text(confirmed_anchors, 2500, keep="tail")
+
+        quote_system = (
+            "You classify the TARGET quoted span in a raw Chinese novel packet. "
+            "Do not identify a nearby character. Decide whether it is actual person speech, "
+            "group speech, narration/thought, embedded text, or sound/text. Cite only original "
+            "packet lines using L<number>. Call submit_review with quote_type, voice_kind, confidence, "
+            "citations, and a brief raw-text reason."
+        )
+        quote_text, quote_pec, quote_ec = self._run_agent(
+            "QuoteTypeAgent", "quote_type", quote_system,
+            f"Classify only the target quote. Prior annotations are absent.\n\n{packet_text}",
+            round_log,
+            required_tags=("quote_type", "voice_kind", "confidence", "citations"),
+        )
+        quote_card = self._parse_card(quote_text)
+
+        local_system = (
+            "You are a blind local speaker-attribution reviewer for a Chinese novel. Use only the raw "
+            "evidence packet. Identify the TARGET speaker, not a mentioned person and not the speaker "
+            "of an adjacent quote. A speech verb is strong only when it grammatically binds to the TARGET. "
+            "Check both before-quote and after-quote attribution. Alternation is a last tie-breaker. "
+            "An immediate narrative gesture that demonstrates a referent in the target quote can support the "
+            "preceding quote; a later generic reaction cannot. "
+            "Do not use outside knowledge, character stereotypes, name meanings, or the topic of a line as evidence. "
+            "If the neighboring turns have raw-text anchors, test whether the target is the intervening reply instead "
+            "of copying a nearby speaker. "
+            "Do not use prior labels. Call submit_review with speaker, quote_type, evidence_basis, confidence, "
+            "citations, and a brief target-bound reason."
+        )
+        local_text, local_pec, local_ec = self._run_agent(
+            "LocalAttributor", "blind_local_attribution", local_system,
+            f"Find the TARGET speaker independently.\n\n{packet_text}\n\n[Confirmed anchors only]\n{anchor_text}",
+            round_log,
+            required_tags=("speaker", "quote_type", "evidence_basis", "confidence", "citations"),
+        )
+        local_card = self._parse_card(local_text)
+
+        block_system = (
+            "You are a blind dialogue-block solver for a Chinese novel. Read the full local block and "
+            "assign speakers jointly before deciding the TARGET. Use raw narrative anchors on either side. "
+            "Treat an immediate demonstrative action after a quote as possible attribution for that quote, "
+            "not as evidence for an earlier adjacent turn. "
+            "Narrative can reset alternation and one character may speak consecutively. Do not inherit "
+            "outside character knowledge or select a speaker only because the topic sounds characteristic. First find "
+            "which turns are locally anchored; when the turns on both sides are anchored to one speaker, explicitly "
+            "test the target as the intervening reply. "
+            "previous labels or invent names. Call submit_review with block_assignments, target_speaker, quote_type, "
+            "evidence_basis, confidence, citations, and a brief target-bound reason."
+        )
+        block_text, block_pec, block_ec = self._run_agent(
+            "BlockSolver", "blind_block_attribution", block_system,
+            f"Solve the dialogue block jointly. The target is marked.\n\n{packet_text}\n\n[Confirmed anchors only]\n{anchor_text}",
+            round_log,
+            required_tags=("block_assignments", "target_speaker", "quote_type", "evidence_basis", "confidence", "citations"),
+        )
+        block_card = self._parse_card(block_text, speaker_tags=("target_speaker", "speaker"))
+        block_card["assignments"] = get_ensemble_tag(block_text, "block_assignments")[:1000]
+
+        candidate_cards = {
+            "quote_type_review": {
+                key: quote_card[key]
+                for key in ("quote_type", "voice_kind", "confidence", "citations", "reason")
+            },
+            "local_attribution_review": {
+                key: local_card[key]
+                for key in ("speaker", "quote_type", "evidence_basis", "confidence", "citations", "reason")
+            },
+            "block_attribution_review": {
+                key: block_card[key]
+                for key in ("speaker", "quote_type", "evidence_basis", "confidence", "citations", "reason", "assignments")
+            },
+        }
+        counterfactual_system = (
+            "You are an adversarial evidence reviewer for dialogue attribution. The raw packet is authoritative. "
+            "Inspect the anonymous candidate claims and try to falsify them: an attribution verb may belong to "
+            "a neighboring quote, a named person may be only the addressee, or the target may not be actual speech. "
+            "Choose the most defensible target speaker only after checking the exact raw lines. Do not apply any "
+            "outside character knowledge or decide from topic/persona alone. Challenge a shared candidate conclusion "
+            "when the local turn sequence and post-quote narrative point elsewhere. "
+            "novel-specific rule. Call submit_review with preferred_speaker, evidence_basis, confidence, citations, "
+            "and a reason stating which candidate evidence survives or fails."
+        )
+        counterfactual_text, counterfactual_pec, counterfactual_ec = self._run_agent(
+            "CounterfactualReviewer", "candidate_refutation", counterfactual_system,
+            f"Challenge the candidate claims against the raw target evidence.\n\n{packet_text}\n\n"
+            f"[Anonymous candidate cards]\n{json.dumps(candidate_cards, ensure_ascii=False, indent=2)}",
+            round_log,
+            required_tags=("preferred_speaker", "evidence_basis", "confidence", "citations"),
+        )
+        counterfactual_card = self._parse_card(
+            counterfactual_text,
+            speaker_tags=("preferred_speaker", "speaker"),
+        )
+
+        anonymous_cards = {
+            **candidate_cards,
+            "counterfactual_review": {
+                key: counterfactual_card[key]
+                for key in ("speaker", "evidence_basis", "confidence", "citations", "reason")
+            },
+        }
+        arbiter_system = (
+            "You are a citation-based adjudicator for dialogue speaker annotation. The raw packet is "
+            "authoritative; anonymous reviews are hypotheses. Reject an attribution if it belongs to a "
+            "different quote. Prefer direct quote-bound evidence and use dialogue flow only as a tie-breaker. "
+            "Consider an immediate demonstrative action after a quote when it clearly continues that quote's referent. "
+            "Do not rely on outside character knowledge, a name's presumed speech style, or the semantic topic alone. "
+            "When both neighboring turns have local anchors, evaluate the target as a distinct intervening turn. "
+            "Do not use novel-specific rules. Call submit_review with speaker, quote_type, evidence_basis, confidence, "
+            "citations, and a brief target-bound reason."
+        )
+        arbiter_text, arbiter_pec, arbiter_ec = self._run_agent(
+            "CitationArbiter", "citation_arbitration", arbiter_system,
+            f"Adjudicate the TARGET speaker from raw text. Do not trust unsupported claims.\n\n{packet_text}\n\n"
+            f"[Anonymous review cards]\n{json.dumps(anonymous_cards, ensure_ascii=False, indent=2)}",
+            round_log,
+            required_tags=("speaker", "quote_type", "evidence_basis", "confidence", "citations"),
+        )
+        arbiter_card = self._parse_card(arbiter_text)
+
+        decision = self._select_decision(quote_card, local_card, block_card, arbiter_card, packet)
+        reason = (
+            f"quality_ensemble={decision['selection_source']}; "
+            f"citations={','.join(f'L{line}' for line in decision['citations']) or 'none'}; "
+            f"arbiter={arbiter_card.get('reason') or 'no reason'}"
+        )[:800]
+        metadata = {
+            "decision": decision,
+            "packet": {
+                "raw_start": packet["raw_start"],
+                "raw_end": packet["raw_end"],
+                "target_dialogue_index": packet["target"]["dialogue_index"],
+                "turn_count": len(packet["turns"]),
+            },
+            "reviews": {
+                "quote_type": {key: value for key, value in quote_card.items() if key != "raw"},
+                "local": {key: value for key, value in local_card.items() if key != "raw"},
+                "block": {key: value for key, value in block_card.items() if key != "raw"},
+                "counterfactual": {key: value for key, value in counterfactual_card.items() if key != "raw"},
+                "arbiter": {key: value for key, value in arbiter_card.items() if key != "raw"},
+            },
+            "model_calls": self.model_call_count - calls_before,
+        }
+        total_pec = quote_pec + local_pec + block_pec + counterfactual_pec + arbiter_pec
+        total_ec = quote_ec + local_ec + block_ec + counterfactual_ec + arbiter_ec
+        summary = f"{decision['speaker']} | {dialogue[:80]}"
+        return decision["speaker"], summary, reason, total_pec, total_ec, metadata
+
+
+# ============================================================
 # Boss (Python orchestrator)
 # ============================================================
 
 class Boss:
-    def __init__(self, short_mem_rounds=20):
+    def __init__(self, short_mem_rounds=20, decision_mode=None):
+        self.decision_mode = (decision_mode or DECISION_MODE or "quality").strip().lower()
+        if self.decision_mode not in {"quality", "ensemble", "legacy"}:
+            raise ValueError(f"Unsupported decision mode: {self.decision_mode}")
         self.labeler = LabelerAgent()
         self.verifier = VerifierAgent()
         self.short_mem = ShortMemAgent(max_rounds=short_mem_rounds)
         self.dialogue_list = get_dialogue_list()
+        with open(NOVEL_PATH, "r", encoding="utf-8") as f:
+            self.novel_lines = f.readlines()
+        self.ensemble = QualityEnsemble()
+        self.quality_audit = QualityAudit()
         self.total_tokens = 0
         self.round_count = 0
         self.search_agent_triggers = 0
@@ -2559,6 +4028,15 @@ class Boss:
             deep_search_fn=deep_search_identity,
             find_refs_fn=find_all_references
         )
+
+    def _canonicalize_verified_alias(self, speaker):
+        cleaned = validate_char_name(speaker)
+        if not cleaned or cleaned in {NON_PERSON_LABEL, "?"}:
+            return speaker, ""
+        canonical, status = self.vault.alias_status(cleaned)
+        if canonical != cleaned and status == "verified":
+            return canonical, f"verified alias {cleaned} -> {canonical}"
+        return cleaned, ""
 
     def _find_dialogue_index(self, line_num, dialogue):
         """Find the target dialogue in the extracted dialogue list."""
@@ -2675,25 +4153,60 @@ class Boss:
 
     def _is_short_or_fragment(self, dialogue):
         text = (dialogue or "").strip()
-        han_count = len(re.findall(r"[\u4e00-\u9fff]", text))
+        han_count = len(re.findall(r"[一-鿿]", text))
         return len(text) <= 12 or han_count <= 4
 
-    def _risk_reasons(self, speaker, dialogue, tool_rounds_used, next_expected, local_structure=None):
+    def _label_matches_local_candidates(self, label, local_evidence):
+        cleaned = validate_char_name(label) or (label or "").strip()
+        if not cleaned or cleaned == NON_PERSON_LABEL:
+            return False
+        candidates = (local_evidence or {}).get("attribution_candidates") or []
+        named_candidates = []
+        for item in candidates:
+            candidate = validate_char_name(item.get("speaker")) or item.get("speaker", "")
+            if candidate and not is_generic_speaker_label(candidate):
+                named_candidates.append(candidate)
+        if not named_candidates:
+            return True
+        return any(cleaned == cand or cleaned in cand or cand in cleaned for cand in named_candidates)
+
+    def _risk_reasons(self, speaker, dialogue, tool_rounds_used, next_expected,
+                      local_structure=None, local_evidence=None, labeler_evidence=None):
         """Return generic risk reasons that should trigger independent review."""
         reasons = []
         normalized = (speaker or "").strip()
+        cleaned = validate_char_name(normalized) or normalized
+        labeler_evidence = labeler_evidence or {}
+        basis = (labeler_evidence.get("evidence_basis") or "unknown").strip().lower()
+        confidence = (labeler_evidence.get("confidence") or "low").strip().lower()
+        quote_type = (labeler_evidence.get("quote_type") or "unclear").strip().lower()
         short_fragment = self._is_short_or_fragment(dialogue)
-        phase_conflict = bool(next_expected and normalized and normalized != next_expected)
+        phase_conflict = bool(next_expected and cleaned and cleaned != next_expected)
         no_narrative_break = bool(
             local_structure and local_structure.get("no_narrative_break_from_previous")
         )
+        local_candidates = (local_evidence or {}).get("attribution_candidates") or []
+        quote_cautions = (local_evidence or {}).get("quote_type_cautions") or []
 
-        if normalized == "?":
+        if cleaned == "?":
             reasons.append("speaker unresolved")
-        if normalized in TEMP_DESCRIPTORS:
-            reasons.append("speaker is a temporary descriptor and may need identity verification")
-        if validate_char_name(normalized) == NON_PERSON_LABEL:
+        if is_generic_speaker_label(cleaned):
+            reasons.append("speaker is a generic descriptor and may need canonical named identity")
+        if validate_char_name(cleaned) == NON_PERSON_LABEL:
             reasons.append("speaker is non-person; quote type should be verified")
+        if quote_cautions and self._is_concrete_speaker(cleaned):
+            reasons.append("local quote-type cautions may mean this is not ordinary direct speech")
+        if local_candidates and not self._label_matches_local_candidates(cleaned, local_evidence):
+            reasons.append("nearby explicit attribution candidate does not match current speaker")
+        if basis in {"alternation", "inference", "unknown"}:
+            if short_fragment or no_narrative_break or local_candidates:
+                reasons.append(f"labeler relied on weak evidence_basis={basis}")
+        if confidence == "low":
+            reasons.append("labeler confidence is low")
+        if quote_type in {"thought_or_narration", "sound_or_text"} and self._is_concrete_speaker(cleaned):
+            reasons.append(f"labeler quote_type={quote_type} conflicts with concrete speaker")
+        if quote_type in {"direct_speech", "group_speech"} and validate_char_name(cleaned) == NON_PERSON_LABEL:
+            reasons.append(f"labeler quote_type={quote_type} conflicts with non-person speaker")
         if phase_conflict:
             if no_narrative_break:
                 reasons.append("speaker conflicts with adjacent two-person exchange without narrative break")
@@ -2701,25 +4214,21 @@ class Boss:
                 reasons.append("speaker conflicts with recent two-person exchange expectation")
         if no_narrative_break and self.short_mem.detect_rapid_exchange(3) and short_fragment:
             reasons.append("short line follows adjacent dialogue without narrative break")
-        if (
-            local_structure
-            and local_structure.get("has_nearby_attribution_word")
-            and (phase_conflict or normalized in TEMP_DESCRIPTORS or normalized == "?")
-        ):
+        if local_structure and local_structure.get("has_nearby_attribution_word"):
             reasons.append("nearby speech attribution words should be checked")
         if self.short_mem.detect_rapid_exchange(4) and short_fragment:
             reasons.append("short or fragmentary line inside a rapid exchange")
         if reasons and tool_rounds_used <= 1 and short_fragment:
             reasons.append("low evidence depth for a short or fragmentary line")
 
-        return reasons
+        return list(dict.fromkeys(reasons))
 
     def _is_concrete_speaker(self, speaker):
         cleaned = validate_char_name(speaker)
-        return bool(cleaned and cleaned not in (NON_PERSON_LABEL, "?") and cleaned not in TEMP_DESCRIPTORS)
+        return bool(cleaned and cleaned not in (NON_PERSON_LABEL, "?") and not is_generic_speaker_label(cleaned))
 
     def _should_apply_verifier_change(self, current_speaker, suggested, verifier_reason,
-                                      evidence_basis="unknown", confidence="low"):
+                                      evidence_basis="unknown", confidence="low", local_evidence=None):
         """Conservatively decide whether Verifier may override the primary label."""
         current = validate_char_name(current_speaker) or current_speaker
         proposed = validate_char_name(suggested)
@@ -2727,6 +4236,12 @@ class Boss:
             return False
 
         current_is_concrete = self._is_concrete_speaker(current)
+        current_is_generic = is_generic_speaker_label(current)
+        proposed_is_generic = is_generic_speaker_label(proposed)
+
+        # Never replace a concrete named speaker with a vague role/appearance label.
+        if current_is_concrete and proposed_is_generic:
+            return False
 
         basis = (evidence_basis or "unknown").strip().lower()
         conf = (confidence or "low").strip().lower()
@@ -2745,13 +4260,17 @@ class Boss:
             if basis != "quote_type" or not any(p in reason for p in nonperson_strong_phrases):
                 return False
 
+        # Alternation is allowed to trigger review, but it is no longer enough to rewrite labels.
         if basis in {"alternation", "dialogue_structure", "dialogue structure"}:
-            alternation_strong_phrases = (
-                "no narrative", "without narrative", "no intervening narrative",
-                "adjacent dialogue", "rapid exchange", "alternating",
-                "没有叙述", "无叙述", "相邻对话", "连续对话", "快速对话", "交替",
-            )
-            return any(p in reason for p in alternation_strong_phrases)
+            return False
+
+        if current == NON_PERSON_LABEL and proposed != NON_PERSON_LABEL and basis != "explicit_attribution":
+            return False
+        if basis == "quote_type" and proposed != NON_PERSON_LABEL:
+            return False
+
+        if basis == "identity_alias":
+            return current_is_generic and not proposed_is_generic
 
         strong_bases = {"explicit_attribution", "quote_type"}
         if basis not in strong_bases:
@@ -2766,6 +4285,10 @@ class Boss:
             "明确", "直接", "说：", "说道", "问道", "回答", "开口", "喊道", "叫道",
         )
         if any(p in reason for p in weak_phrases) and not any(p in reason for p in strong_phrases):
+            return False
+        if basis == "explicit_attribution" and not any(p in reason for p in strong_phrases):
+            return False
+        if basis == "explicit_attribution" and not self._label_matches_local_candidates(proposed, local_evidence):
             return False
 
         narrative_non_person_phrases = (
@@ -2795,6 +4318,8 @@ class Boss:
         navigation_text = self._build_navigation(line_num, nav_range=25)
         local_structure = self._local_dialogue_structure(line_num, dialogue)
         structure_hint = self._format_structure_hint(local_structure)
+        local_evidence = analyze_local_evidence(line_num, dialogue, local_structure)
+        local_evidence_hint = format_local_evidence_hint(local_evidence)
 
         # 2. Get evidence and memory
         evidence_text = self.vault.get_state_text(current_line=line_num)
@@ -2816,6 +4341,7 @@ class Boss:
             "evidence": evidence_text,
             "navigation": navigation_text,
             "local_structure": local_structure,
+            "local_evidence": local_evidence,
         }
         temp_log_event(
             "round_context_ready",
@@ -2824,25 +4350,110 @@ class Boss:
             short_mem_len=len(short_mem_text or ""),
             evidence_len=len(evidence_text or ""),
             context_index_len=len(context_text or ""),
+            local_evidence_len=len(local_evidence_hint or ""),
         )
 
-        # 5. Call Labeler (READ-ONLY, no state writing)
-        speaker, summary, reason_text, pec, ec, tool_rounds_used = self.labeler.label(
-            line_num, dialogue, short_mem_text, "",
-            evidence_text, navigation_text, "",
-            round_log, quiet=quiet, override_force_tool=True,
-            recent_speakers_hint=recent_speakers_hint,
-            structure_hint=structure_hint,
-        )
+        # 5. Decide from raw text. Quality mode keeps blind reviewers separate
+        # from provisional memory; legacy mode remains available for comparison.
+        ensemble_metadata = None
+        audit_metadata = None
+        baseline_speaker = ""
+        confirmed_anchor = False
+        if self.decision_mode == "quality":
+            baseline_speaker, baseline_summary, baseline_reason, base_pec, base_ec, tool_rounds_used = self.labeler.label(
+                line_num, dialogue, short_mem_text, "",
+                evidence_text, navigation_text, "",
+                round_log, quiet=quiet, override_force_tool=True,
+                recent_speakers_hint=recent_speakers_hint,
+                structure_hint=structure_hint,
+                local_evidence_hint=local_evidence_hint,
+            )
+            baseline_evidence = dict(round_log.get("labeler_evidence", {}))
+            speaker, summary, audit_reason, audit_pec, audit_ec, audit_metadata = self.quality_audit.decide(
+                self.novel_lines,
+                self.dialogue_list,
+                line_num,
+                dialogue,
+                baseline_speaker,
+                baseline_evidence,
+                round_log,
+            )
+            pec = base_pec + audit_pec
+            ec = base_ec + audit_ec
+            reason_text = (
+                f"baseline={baseline_speaker}: {baseline_reason} | {audit_reason}"
+            )[:1000]
+            decision = audit_metadata["decision"]
+            confirmed_anchor = bool(decision.get("confirmed_anchor"))
+            round_log["quality_audit"] = audit_metadata
+            round_log["labeler_evidence"] = {
+                "quote_type": decision.get("quote_type", baseline_evidence.get("quote_type", "unclear")),
+                "evidence_basis": decision.get("evidence_basis", "unknown"),
+                "confidence": decision.get("confidence", "low"),
+            }
+            if not quiet:
+                self._safe_print(
+                    f"  Quality audit: {baseline_speaker} -> {speaker} "
+                    f"(source={decision.get('selection_source')}, anchor={confirmed_anchor})"
+                )
+        elif self.decision_mode == "ensemble":
+            speaker, summary, reason_text, pec, ec, ensemble_metadata = self.ensemble.decide(
+                self.novel_lines,
+                self.dialogue_list,
+                line_num,
+                dialogue,
+                self.short_mem.get_confirmed_summary(),
+                round_log,
+            )
+            decision = ensemble_metadata["decision"]
+            confirmed_anchor = bool(decision.get("confirmed_anchor"))
+            tool_rounds_used = 0
+            round_log["quality_ensemble"] = ensemble_metadata
+            round_log["labeler_evidence"] = {
+                "quote_type": decision.get("quote_type", "unclear"),
+                "evidence_basis": decision.get("evidence_basis", "unknown"),
+                "confidence": decision.get("confidence", "low"),
+            }
+            if not quiet:
+                self._safe_print(
+                    f"  Quality ensemble: {speaker} "
+                    f"(source={decision.get('selection_source')}, anchor={confirmed_anchor})"
+                )
+        else:
+            speaker, summary, reason_text, pec, ec, tool_rounds_used = self.labeler.label(
+                line_num, dialogue, short_mem_text, "",
+                evidence_text, navigation_text, "",
+                round_log, quiet=quiet, override_force_tool=True,
+                recent_speakers_hint=recent_speakers_hint,
+                structure_hint=structure_hint,
+                local_evidence_hint=local_evidence_hint,
+            )
+            confirmed_anchor = True
+            if not quiet:
+                self._safe_print(f"  Labeler: {speaker} (tools={tool_rounds_used})")
+
+        if not is_valid_final_speaker(speaker):
+            if is_valid_final_speaker(baseline_speaker):
+                invalid_speaker = speaker
+                speaker = validate_char_name(baseline_speaker)
+                reason_text = (
+                    f"{reason_text} | Output guard rejected {invalid_speaker!r}; retained baseline {speaker}"
+                )[:1000]
+                if audit_metadata is not None:
+                    audit_metadata["decision"]["output_guard_rejected"] = invalid_speaker
+                    audit_metadata["decision"]["speaker"] = speaker
+                    audit_metadata["decision"]["selection_source"] = "output-guard-baseline"
+            else:
+                speaker = "?"
+                confirmed_anchor = False
         self.total_tokens += pec + ec
+        round_log["annotation_tokens"] = pec + ec
 
-        if not quiet:
-            self._safe_print(f"  Labeler: {speaker} (tools={tool_rounds_used})")
-
-        # 5b. Phase anchor check: did Labeler violate the alternating pattern?
+        # 5b. Phase hints are legacy-only. Quality mode never lets an
+        # unconfirmed output steer the next raw-text decision.
         corrected = False
-        next_exp = self.short_mem.get_next_expected()
-        if next_exp and speaker != next_exp:
+        next_exp = self.short_mem.get_next_expected() if self.decision_mode == "legacy" else None
+        if self.decision_mode == "legacy" and next_exp and speaker != next_exp:
             self.short_mem.phase_violation = True
             if not quiet:
                 self._safe_print(f"  Phase violation: expected {next_exp}, got {speaker}")
@@ -2850,7 +4461,7 @@ class Boss:
             self.short_mem.phase_violation = False
 
         # 6. SearchAgent: conditional trigger for temporary descriptors
-        if speaker in TEMP_DESCRIPTORS:
+        if is_generic_speaker_label(speaker):
             self.search_agent_triggers += 1
             if not quiet:
                 try:
@@ -2879,6 +4490,7 @@ class Boss:
                     old_speaker = speaker
                     speaker = character
                     corrected = True
+                    confirmed_anchor = True
                     self.corrections += 1
                     if not quiet:
                         self._safe_print(f"  Corrected: '{old_speaker}' -> '{character}'")
@@ -2886,20 +4498,35 @@ class Boss:
                 if not quiet:
                     self._safe_print(f"  SearchAgent: no identity found for '{speaker}'")
 
+        canonical_speaker, canonical_reason = self._canonicalize_verified_alias(speaker)
+        if canonical_reason:
+            old_speaker = speaker
+            speaker = canonical_speaker
+            corrected = True
+            self.corrections += 1
+            reason_text = f"{reason_text} | Canonicalized {old_speaker} -> {speaker}: {canonical_reason}".strip()
+            if not quiet:
+                self._safe_print(f"  Canonicalized: {old_speaker} -> {speaker}")
+
         # 7. Update EvidenceVault last_seen
-        if speaker and speaker != "非人物发声" and speaker != "non-human":
+        if speaker and speaker != NON_PERSON_LABEL and speaker != "non-human" and not is_generic_speaker_label(speaker):
             self.vault.update_last_seen(speaker, line_num)
 
         # 8. Fallback
         if not speaker:
             speaker = "?"
 
-        # 8b. Generic risk review. This deliberately avoids novel-specific
-        # names or organizations; it only checks ambiguity patterns that occur
-        # across novels.
-        risk_reasons = self._risk_reasons(
-            speaker, dialogue, tool_rounds_used, next_exp, local_structure=local_structure
-        )
+        # 8b. Legacy risk review. Quality mode already used independent blind
+        # reviews and a citation arbiter, so reintroducing the selected label as
+        # a verifier anchor would be counterproductive.
+        risk_reasons = []
+        if self.decision_mode == "legacy":
+            risk_reasons = self._risk_reasons(
+                speaker, dialogue, tool_rounds_used, next_exp,
+                local_structure=local_structure,
+                local_evidence=local_evidence,
+                labeler_evidence=round_log.get("labeler_evidence", {}),
+            )
         if risk_reasons:
             if not quiet:
                 self._safe_print(f"  Risk review: {', '.join(risk_reasons)}")
@@ -2911,6 +4538,7 @@ class Boss:
                     "", evidence_text, speaker, round_log, quiet=quiet,
                     risk_reasons=risk_reasons,
                     structure_hint=structure_hint,
+                    local_evidence_hint=local_evidence_hint,
                 )
             except Exception as exc:
                 verdict = "skipped"
@@ -2930,7 +4558,8 @@ class Boss:
             }
             temp_log_event("risk_review_complete", round_log, review=round_log["risk_review"])
             if verdict == "disagree" and self._should_apply_verifier_change(
-                speaker, suggested, verifier_reason, evidence_basis, confidence
+                speaker, suggested, verifier_reason, evidence_basis, confidence,
+                local_evidence=local_evidence,
             ):
                 old_speaker = speaker
                 speaker = validate_char_name(suggested) or suggested
@@ -2947,7 +4576,14 @@ class Boss:
 
         # 10. Update ShortMem with narrative context
         narr_before = get_narrative_before(line_num)
-        self.short_mem.update(line_num, dialogue, speaker, reason_text, narrative_before=narr_before)
+        self.short_mem.update(
+            line_num,
+            dialogue,
+            speaker,
+            reason_text,
+            narrative_before=narr_before,
+            confirmed=confirmed_anchor,
+        )
 
         # 11. Save vault periodically
         if self.round_count % 50 == 0:
@@ -2958,7 +4594,13 @@ class Boss:
             "summary": summary,
             "reason": reason_text,
             "corrected": corrected,
+            "decision_mode": self.decision_mode,
+            "confirmed_anchor": confirmed_anchor,
         }
+        if ensemble_metadata is not None:
+            ensemble_metadata["final_speaker"] = speaker
+        if audit_metadata is not None:
+            audit_metadata["final_speaker"] = speaker
 
         return speaker
 
@@ -3116,10 +4758,22 @@ def _writeline(msg):
 
 def main():
     global API_MODEL_FILTER, API_MODEL_PRIORITY, MODEL_PROVIDER, API_RETRIES, API_RETRY_DELAY
+    global DECISION_MODE, DIALOGUE_BLOCK_RADIUS, QUALITY_REQUEST_TIMEOUT
+    global QUALITY_SCENE_RADIUS, QUALITY_AUDIT_RETRIES
     parser = argparse.ArgumentParser(description="Multi-agent novel dialogue speaker annotation v4")
     parser.add_argument("--start", type=int, default=0, help="Start from dialogue index (0=resume)")
     parser.add_argument("--count", type=int, default=1, help="Number of dialogues to annotate")
     parser.add_argument("--short-mem", type=int, default=20, help="Short-term memory rounds")
+    parser.add_argument("--decision-mode", choices=["quality", "ensemble", "legacy"], default=DECISION_MODE,
+                        help="Annotation path: baseline-preserving quality audit (default), experimental ensemble, or legacy")
+    parser.add_argument("--dialogue-block-radius", type=int, default=DIALOGUE_BLOCK_RADIUS,
+                        help="Neighboring dialogue turns on each side for quality-mode block review")
+    parser.add_argument("--quality-request-timeout", type=int, default=QUALITY_REQUEST_TIMEOUT,
+                        help="Seconds before one quality-review API call fails over to another model")
+    parser.add_argument("--quality-scene-radius", type=int, default=QUALITY_SCENE_RADIUS,
+                        help="Neighboring dialogue turns on each side for baseline-preserving quality audit")
+    parser.add_argument("--quality-audit-retries", type=int, default=QUALITY_AUDIT_RETRIES,
+                        help="Fresh full-decision attempts after malformed quality-audit output")
     parser.add_argument("--validate", action="store_true", help="Run validation after annotation")
     parser.add_argument("--error-limit", type=int, default=_env_int("NOVEL_VALIDATE_ERROR_LIMIT", 30),
                         help="Validation error rows to print; 0 means all")
@@ -3144,6 +4798,9 @@ def main():
                         help="When using api-fallback, restrict calls to one provider/model substring")
     parser.add_argument("--api-priority", default=os.environ.get("NOVEL_API_PRIORITY", ""),
                         help="Comma-separated provider/model names to move to the front of api-fallback order")
+    parser.add_argument("--api-round-robin-offset", type=int,
+                        default=_env_int("NOVEL_API_ROUND_ROBIN_OFFSET", 0),
+                        help="Initial offset for every API round-robin key pool; use different offsets for parallel runs")
     parser.add_argument("--health-check", choices=["all", "first", "none"],
                         default=os.environ.get("NOVEL_API_HEALTH_CHECK", "all"),
                         help="API startup health checks: all models, first priority model only, or none")
@@ -3166,6 +4823,16 @@ def main():
     API_MODEL_PRIORITY = [item.strip() for item in args.api_priority.split(",") if item.strip()]
     API_RETRIES = max(1, args.api_retries)
     API_RETRY_DELAY = max(0.0, args.api_retry_delay)
+    DECISION_MODE = args.decision_mode
+    DIALOGUE_BLOCK_RADIUS = max(1, args.dialogue_block_radius)
+    QUALITY_REQUEST_TIMEOUT = max(1, args.quality_request_timeout)
+    QUALITY_SCENE_RADIUS = max(4, args.quality_scene_radius)
+    QUALITY_AUDIT_RETRIES = max(1, args.quality_audit_retries)
+    if DECISION_MODE == "quality" and MODEL_PROVIDER == "api-fallback":
+        if not API_MODEL_FILTER:
+            API_MODEL_FILTER = "sense-nova"
+        elif "sense" not in API_MODEL_FILTER.lower():
+            parser.error("quality decision mode currently permits SenseNova API models only")
 
     print("=" * 60)
     print("  Multi-agent Novel Dialogue Speaker Annotation v4")
@@ -3187,11 +4854,28 @@ def main():
         print(f"  API retries: {API_RETRIES} (base delay {API_RETRY_DELAY:g}s)")
         print(f"  API health check: {args.health_check}")
     print(f"  Short-term memory: {args.short_mem} rounds")
+    print(f"  Decision mode: {DECISION_MODE}")
+    if DECISION_MODE == "quality":
+        print(f"  Quality scene radius: {QUALITY_SCENE_RADIUS} turns per side")
+        print(f"  Quality audit retries: {QUALITY_AUDIT_RETRIES}")
+        print(f"  Quality request timeout: {QUALITY_REQUEST_TIMEOUT}s")
+    elif DECISION_MODE == "ensemble":
+        print(f"  Dialogue block radius: {DIALOGUE_BLOCK_RADIUS} turns per side")
+        print(f"  Quality request timeout: {QUALITY_REQUEST_TIMEOUT}s")
     print(f"  Token budget: {TOKEN_BUDGET}")
     print(f"  Max tool rounds: {MAX_TOOL_ROUNDS}")
 
     if MODEL_PROVIDER == "api-fallback":
         init_api_fallback(health_check=args.health_check)
+        if args.api_round_robin_offset:
+            groups = {model.round_robin_group for model in API_MODELS if model.round_robin_group}
+            for group in groups:
+                API_ROUND_ROBIN_CURSOR[group] = args.api_round_robin_offset
+            if groups:
+                print(
+                    "  API round-robin offset: "
+                    f"{args.api_round_robin_offset} for {', '.join(sorted(groups))}"
+                )
 
     # Roster check
     try:
@@ -3265,10 +4949,11 @@ def main():
     total_rounds = end_idx - start_idx
     quiet_mode = total_rounds > 20
 
-    boss = Boss(short_mem_rounds=args.short_mem)
+    boss = Boss(short_mem_rounds=args.short_mem, decision_mode=DECISION_MODE)
 
     batch_tool_calls = 0
     batch_tokens = 0
+    batch_model_calls = 0
 
     for idx in range(start_idx, end_idx):
         line_num, dialogue = dialogues[idx]
@@ -3313,7 +4998,11 @@ def main():
 
         batch_tool_calls += len(round_log.get("tool_calls", []))
         labeler = round_log.get("agents", {}).get("Labeler", {})
-        batch_tokens += labeler.get("total_tokens", 0)
+        batch_tokens += round_log.get("annotation_tokens", labeler.get("total_tokens", 0))
+        batch_model_calls += (
+            round_log.get("quality_audit", {}).get("model_calls", 0)
+            + round_log.get("quality_ensemble", {}).get("model_calls", 0)
+        )
 
         done = idx - start_idx + 1
         elapsed = time.time() - start_time
@@ -3325,11 +5014,11 @@ def main():
             avg_sec = elapsed / done
             remaining_sec = avg_sec * (total_rounds - done)
             _writeline(f"  [{done}/{total_rounds}] L{line_num} -> {speaker:<8s} | "
-                       f"tools={batch_tool_calls:>3d} avg={avg_sec:.0f}s "
+                       f"calls={batch_model_calls:>3d} tools={batch_tool_calls:>3d} avg={avg_sec:.0f}s "
                        f"elapsed={fmt_duration(elapsed)} remaining={fmt_duration(remaining_sec)}")
         else:
             _writeline(f"  [{done}/{total_rounds}] L{line_num} -> {speaker:<8s} | "
-                       f"tools={batch_tool_calls:>3d} avg={avg_sec:.0f}s "
+                       f"calls={batch_model_calls:>3d} tools={batch_tool_calls:>3d} avg={avg_sec:.0f}s "
                        f"elapsed={fmt_duration(elapsed)} remaining={fmt_duration(remaining_sec)}")
 
     if quiet_mode:
@@ -3338,6 +5027,10 @@ def main():
     _writeline(f"\n{'='*60}")
     _writeline(f"  Annotation complete")
     _writeline(f"  Dialogues annotated: {end_idx - start_idx}")
+    _writeline(
+        "  Quality review model calls: "
+        f"{boss.quality_audit.model_call_count + boss.ensemble.model_call_count}"
+    )
     _writeline(f"  Tool calls: {boss.labeler.tool_call_count}")
     _writeline(f"  SearchAgent triggers: {boss.search_agent_triggers}")
     _writeline(f"  Corrections: {boss.corrections}")

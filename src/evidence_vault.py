@@ -86,13 +86,25 @@ class EvidenceVault:
                 active.append(name)
         return active
 
-    def resolve_alias(self, name):
+    def resolve_alias(self, name, verified_only=False):
         if name in self.data["characters"]:
             return name
         for char_name, info in self.data["characters"].items():
+            if verified_only and info.get("status") != "verified":
+                continue
             if name in info.get("aliases", []):
                 return char_name
         return name
+
+    def alias_status(self, name):
+        """Return (canonical_name, status) when name is a known alias."""
+        if name in self.data["characters"]:
+            info = self.data["characters"].get(name, {})
+            return name, info.get("status", "candidate")
+        for char_name, info in self.data["characters"].items():
+            if name in info.get("aliases", []):
+                return char_name, info.get("status", "candidate")
+        return name, ""
 
     def get_state_text(self, current_line=0):
         lines = []
