@@ -78,7 +78,7 @@ CURRENT_ROUND_TRACE = None
 API_ROUND_ROBIN_CURSOR = {}
 SENSENOVA_MODEL = "sensenova-6.7-flash-lite"
 SENSENOVA_KEYS_PATH = os.path.join(ROOT_DIR, "config", "other_sensenova_apikeys")
-DECISION_MODE = os.environ.get("NOVEL_DECISION_MODE", "ensemble").strip().lower()
+DECISION_MODE = os.environ.get("NOVEL_DECISION_MODE", "quality").strip().lower()
 
 
 def _env_int(name, default):
@@ -97,6 +97,8 @@ def _env_float(name, default):
 
 DIALOGUE_BLOCK_RADIUS = _env_int("NOVEL_DIALOGUE_BLOCK_RADIUS", 4)
 QUALITY_REQUEST_TIMEOUT = _env_int("NOVEL_QUALITY_REQUEST_TIMEOUT", 120)
+QUALITY_SCENE_RADIUS = _env_int("NOVEL_QUALITY_SCENE_RADIUS", 12)
+QUALITY_AUDIT_RETRIES = max(1, _env_int("NOVEL_QUALITY_AUDIT_RETRIES", 2))
 
 
 def _resolve_workspace_path(path_value):
@@ -1553,6 +1555,7 @@ NON_PERSON_ALIASES = {
     "narrator",
     "non-human",
     "non-person",
+    "non_person",
     "nonperson",
     "not-spoken",
     "not_spoken",
@@ -1560,6 +1563,9 @@ NON_PERSON_ALIASES = {
     "sound_effect",
     "ambient-sound",
     "ambient_sound",
+    "narrative",
+    "narration",
+    "narrative_voice",
     "旁白",
     "叙述",
     "叙述者",
@@ -1608,6 +1614,25 @@ def validate_char_name(name):
     if re.search(r"[（(【\[].*[）)】\]]", name):
         return None
     return name
+
+
+INVALID_SPEAKER_OUTPUTS = {
+    "?", "unclear", "unknown", "null", "none", "speaker", "person", "group",
+}
+
+
+def is_valid_final_speaker(name):
+    """Reject protocol values and untranslated labels before they reach state or output."""
+    cleaned = validate_char_name(name)
+    if not cleaned:
+        return False
+    if cleaned == NON_PERSON_LABEL:
+        return True
+    if cleaned.strip().lower() in INVALID_SPEAKER_OUTPUTS:
+        return False
+    if re.search(r"[A-Za-z]", cleaned):
+        return False
+    return bool(re.search(r"[\u4e00-\u9fff]", cleaned))
 
 
 GENERIC_ROLE_SUFFIXES = (
@@ -2876,6 +2901,706 @@ Output exactly:
 
 
 # ============================================================
+# Quality Audit - baseline-preserving, scene-level SenseNova review
+# ============================================================
+
+class QualityAudit:
+    """Audit a legacy candidate from independent views without exposing rationales across roles."""
+
+    QUOTE_KINDS = {"person", "group", "non_person", "unclear"}
+    QUOTE_TYPES = {
+        "direct_speech", "group_speech", "embedded_quote",
+        "thought_or_narration", "sound_or_text", "unclear",
+    }
+    EVIDENCE_BASES = {
+        "explicit_attribution", "speaker_action", "identity_alias",
+        "quote_type", "alternation", "inference", "unknown",
+    }
+    NON_SPEECH_REASON_PHRASES = (
+        "not actual speech", "not spoken", "not as spoken", "not speech", "not dialogue",
+        "not actual spoken", "no character utters", "nobody utters", "not a spoken line",
+        "不是对话", "并非对话", "非对话", "不是人物说", "并非人物说", "无人说出",
+        "没有角色说出", "非实际言语", "并非实际发言", "不是台词", "并非台词",
+        "叙述性文字", "叙述性描写",
+    )
+
+    def __init__(self, dialogue_radius=None):
+        radius = QUALITY_SCENE_RADIUS if dialogue_radius is None else dialogue_radius
+        self.dialogue_radius = max(4, int(radius))
+        self.model_call_count = 0
+
+    @staticmethod
+    def _same_speaker(left, right):
+        return bool(left and right and (left == right or left in right or right in left))
+
+    @staticmethod
+    def _preferred_consensus_label(labels):
+        labels = [validate_char_name(label) for label in labels]
+        labels = [label for label in labels if label and is_valid_final_speaker(label)]
+        if not labels:
+            return ""
+        for candidate in labels:
+            if all(QualityAudit._same_speaker(candidate, other) for other in labels):
+                return max(labels, key=len)
+        return ""
+
+    @classmethod
+    def _speaker_vote_consensus(cls, labels, minimum_support):
+        cleaned_labels = [validate_char_name(label) for label in labels]
+        cleaned_labels = [label for label in cleaned_labels if label and is_valid_final_speaker(label)]
+        best_label = ""
+        best_support = 0
+        for candidate in cleaned_labels:
+            matching = [label for label in cleaned_labels if cls._same_speaker(candidate, label)]
+            support = len(matching)
+            preferred = max(matching, key=len) if matching else candidate
+            if support > best_support or (support == best_support and len(preferred) > len(best_label)):
+                best_label = preferred
+                best_support = support
+        if best_support < minimum_support:
+            return "", best_support
+        return best_label, best_support
+
+    def _parse_card(self, text):
+        raw_speaker = (
+            get_ensemble_tag(text, "speaker")
+            or get_ensemble_tag(text, "target_speaker")
+            or get_ensemble_tag(text, "preferred_speaker")
+        )
+        speaker = validate_char_name(raw_speaker) if raw_speaker else ""
+        citations = parse_line_citations(get_ensemble_tag(text, "citations"))
+        return {
+            "speaker": speaker or "",
+            "voice_kind": get_ensemble_tag(text, "voice_kind", "unclear").strip().lower(),
+            "quote_type": get_ensemble_tag(text, "quote_type", "unclear").strip().lower(),
+            "evidence_basis": get_ensemble_tag(text, "evidence_basis", "unknown").strip().lower(),
+            "confidence": get_ensemble_tag(text, "confidence", "low").strip().lower(),
+            "citations": citations,
+            "reason": get_ensemble_tag(text, "reason")[:500],
+            "raw": text,
+        }
+
+    @staticmethod
+    def _card_from_tool_args(args, raw_text=""):
+        raw_speaker = (
+            args.get("speaker")
+            or args.get("target_speaker")
+            or args.get("preferred_speaker")
+            or ""
+        )
+        speaker = validate_char_name(raw_speaker) if raw_speaker else ""
+        citations = args.get("citations") or []
+        if isinstance(citations, (str, int)):
+            citations = parse_line_citations(str(citations))
+        else:
+            normalized = []
+            for item in citations:
+                try:
+                    normalized.append(int(item))
+                except (TypeError, ValueError):
+                    normalized.extend(parse_line_citations(str(item)))
+            citations = list(dict.fromkeys(normalized))
+        return {
+            "speaker": speaker or "",
+            "voice_kind": str(args.get("voice_kind") or "unclear").strip().lower(),
+            "quote_type": str(args.get("quote_type") or "unclear").strip().lower(),
+            "evidence_basis": str(args.get("evidence_basis") or "unknown").strip().lower(),
+            "confidence": str(args.get("confidence") or "low").strip().lower(),
+            "citations": citations,
+            "reason": str(args.get("reason") or "")[:500],
+            "raw": raw_text,
+        }
+
+    def _card_is_valid(self, card, packet, card_type):
+        if not citations_are_local(card.get("citations", []), packet):
+            return False
+        if card_type == "quote":
+            return (
+                card.get("voice_kind") in self.QUOTE_KINDS
+                and card.get("quote_type") in self.QUOTE_TYPES
+            )
+        return (
+            is_valid_final_speaker(card.get("speaker"))
+            and card.get("evidence_basis") in self.EVIDENCE_BASES
+        )
+
+    @classmethod
+    def _normalize_card_consistency(cls, card, card_type):
+        reason = (card.get("reason") or "").lower()
+        if not any(phrase in reason for phrase in cls.NON_SPEECH_REASON_PHRASES):
+            return card
+        normalized = dict(card)
+        if card_type == "quote":
+            normalized["voice_kind"] = "non_person"
+            if normalized.get("quote_type") in {"unclear", "direct_speech", "group_speech"}:
+                normalized["quote_type"] = "thought_or_narration"
+        else:
+            normalized["speaker"] = NON_PERSON_LABEL
+            normalized["evidence_basis"] = "quote_type"
+        normalized["consistency_normalized"] = True
+        return normalized
+
+    def _run_xml_agent(self, agent_name, role, system_prompt, user_content,
+                       round_log, packet, card_type):
+        total_pec = 0
+        total_ec = 0
+        last_card = {}
+        last_text = ""
+        for attempt in range(1, QUALITY_AUDIT_RETRIES + 1):
+            correction = ""
+            if attempt > 1:
+                correction = (
+                    "\n\nYour previous response was unusable. Re-read the raw text and produce a fresh "
+                    "decision. Copy Chinese names exactly from the source. Include at least one local "
+                    "L<number> citation. Do not output English names, unknown, unclear as a speaker, or prose "
+                    "before the required submit_review tool call."
+                )
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content + correction},
+            ]
+            output_tool = json.loads(json.dumps(QUALITY_OUTPUT_TOOL))
+            if card_type == "quote":
+                required = ["quote_type", "voice_kind", "confidence", "citations", "reason"]
+            else:
+                required = ["speaker", "evidence_basis", "confidence", "citations", "reason"]
+            output_tool["function"]["parameters"]["required"] = required
+            text, pec, ec, tool_calls = call_ollama(
+                messages,
+                tools=[output_tool],
+                label=f"{agent_name}-A{attempt}",
+                request_timeout=QUALITY_REQUEST_TIMEOUT,
+                tool_choice="required",
+            )
+            self.model_call_count += 1
+            total_pec += pec
+            total_ec += ec
+            tool_args = {}
+            for tool_call in tool_calls or []:
+                function = tool_call.get("function", {}) or {}
+                if function.get("name") != "submit_review":
+                    continue
+                parsed_args, parse_error = parse_tool_arguments(
+                    "submit_review", function.get("arguments", "{}")
+                )
+                if parsed_args and not parse_error:
+                    tool_args = parsed_args
+                    break
+                if parsed_args:
+                    tool_args = parsed_args
+            card = self._card_from_tool_args(tool_args, text) if tool_args else self._parse_card(text)
+            card = self._normalize_card_consistency(card, card_type)
+            valid = self._card_is_valid(card, packet, card_type)
+            card["valid"] = valid
+            log_agent(
+                round_log,
+                agent_name if attempt == 1 else f"{agent_name}Retry{attempt}",
+                role,
+                messages,
+                text,
+                pec,
+                ec,
+                tool_calls_list=(
+                    [{"function": "submit_review", "arguments": tool_args}]
+                    if tool_args else None
+                ),
+            )
+            last_card = card
+            last_text = text
+            if valid:
+                break
+        last_card["raw"] = last_text
+        return last_card, total_pec, total_ec
+
+    @staticmethod
+    def _quote_output_format():
+        return (
+            "Call submit_review immediately. Set voice_kind, quote_type, confidence, integer citations, "
+            "and a brief reason. Do not write analysis before the tool call."
+        )
+
+    @staticmethod
+    def _speaker_output_format():
+        return (
+            "Call submit_review immediately. Set speaker to one Chinese source label or 非人物发声, then "
+            "set evidence_basis, confidence, integer citations, and a brief reason. Do not write analysis "
+            "before the tool call."
+        )
+
+    def _select_decision(self, baseline, baseline_evidence, quote_cards,
+                         attribution_cards, final_card, packet):
+        baseline = validate_char_name(baseline) or baseline
+        valid_quotes = [card for card in quote_cards if card.get("valid")]
+        valid_attributions = [card for card in attribution_cards if card.get("valid")]
+        quote_counts = Counter(card.get("voice_kind") for card in valid_quotes)
+        attribution_labels = [card.get("speaker") for card in valid_attributions]
+        minimum_scene_support = max(3, (len(attribution_cards) * 4 + 4) // 5)
+        attribution_consensus, attribution_support = self._speaker_vote_consensus(
+            attribution_labels,
+            minimum_scene_support,
+        )
+        attribution_plurality, attribution_plurality_support = self._speaker_vote_consensus(
+            attribution_labels,
+            1,
+        )
+
+        final_speaker = final_card.get("speaker") if final_card.get("valid") else ""
+        final_panel_support = int(final_card.get("panel_support") or 0)
+        final_panel_size = int(final_card.get("panel_size") or 1)
+        final_panel_speakers = list(final_card.get("panel_speakers") or [])
+        scene_support_for_final = sum(
+            self._same_speaker(final_speaker, label) for label in attribution_labels
+        ) if final_speaker else 0
+        attribution_all_explicit = bool(valid_attributions) and all(
+            card.get("evidence_basis") == "explicit_attribution" for card in valid_attributions
+        )
+        final_support_for_attribution_consensus = sum(
+            self._same_speaker(attribution_consensus, label)
+            for label in final_panel_speakers
+        ) if attribution_consensus else 0
+        source = "baseline-retained"
+        speaker = baseline
+
+        nonperson_support = quote_counts.get("non_person", 0)
+        attribution_nonperson = sum(
+            validate_char_name(label) == NON_PERSON_LABEL for label in attribution_labels
+        )
+        person_support = quote_counts.get("person", 0) + quote_counts.get("group", 0)
+
+        if (
+            final_speaker == NON_PERSON_LABEL
+            and nonperson_support >= 2
+            and attribution_nonperson >= max(2, (len(attribution_cards) + 1) // 2)
+        ):
+            speaker = NON_PERSON_LABEL
+            source = "audited-non-person"
+        elif (
+            baseline == NON_PERSON_LABEL
+            and final_speaker
+            and final_speaker != NON_PERSON_LABEL
+            and person_support == len(quote_cards)
+            and attribution_consensus
+            and self._same_speaker(final_speaker, attribution_consensus)
+        ):
+            speaker = attribution_consensus
+            source = "audited-person-speech"
+        elif (
+            baseline == NON_PERSON_LABEL
+            and attribution_consensus
+            and attribution_consensus != NON_PERSON_LABEL
+            and attribution_support == len(attribution_cards)
+            and len(attribution_labels) == len(attribution_cards)
+            and attribution_all_explicit
+            and final_support_for_attribution_consensus >= 1
+        ):
+            speaker = attribution_consensus
+            source = "explicit-local-person-restoration"
+        elif (
+            attribution_consensus
+            and attribution_support >= 4
+            and len(attribution_labels) >= 4
+            and attribution_consensus != NON_PERSON_LABEL
+            and baseline != NON_PERSON_LABEL
+            and not self._same_speaker(baseline, attribution_consensus)
+        ):
+            speaker = attribution_consensus
+            source = "strong-local-panel-correction"
+        elif (
+            attribution_consensus
+            and final_speaker
+            and self._same_speaker(final_speaker, attribution_consensus)
+            and not self._same_speaker(baseline, attribution_consensus)
+        ):
+            speaker = attribution_consensus
+            source = "audited-speaker-correction"
+        elif (
+            final_speaker
+            and not self._same_speaker(final_speaker, baseline)
+            and final_panel_support >= 2
+            and final_panel_size >= 3
+            and scene_support_for_final >= 3
+        ):
+            speaker = final_speaker
+            source = "joint-panel-correction"
+        elif not is_valid_final_speaker(baseline) and final_speaker:
+            speaker = final_speaker
+            source = "invalid-baseline-replacement"
+
+        if not is_valid_final_speaker(speaker):
+            if is_valid_final_speaker(baseline):
+                speaker = baseline
+                source = "invalid-audit-fallback"
+            else:
+                speaker = "?"
+                source = "unresolved"
+
+        all_high = bool(valid_attributions) and all(
+            card.get("confidence") == "high" for card in valid_attributions
+        )
+        all_explicit = bool(valid_attributions) and all(
+            card.get("evidence_basis") == "explicit_attribution" for card in valid_attributions
+        )
+        final_high = final_card.get("confidence") == "high"
+        confirmed_anchor = bool(
+            source == "audited-speaker-correction"
+            and attribution_consensus
+            and all_high
+            and all_explicit
+            and final_high
+            and final_card.get("evidence_basis") == "explicit_attribution"
+        )
+        if source == "audited-non-person":
+            confirmed_anchor = bool(
+                nonperson_support == len(quote_cards)
+                and attribution_nonperson == len(attribution_cards)
+                and final_high
+            )
+
+        return {
+            "speaker": speaker,
+            "baseline_speaker": baseline,
+            "baseline_changed": not self._same_speaker(speaker, baseline),
+            "selection_source": source,
+            "confirmed_anchor": confirmed_anchor,
+            "quote_votes": dict(quote_counts),
+            "attribution_consensus": attribution_consensus,
+            "attribution_support": attribution_support,
+            "attribution_valid_votes": len(attribution_labels),
+            "attribution_plurality": attribution_plurality,
+            "attribution_plurality_support": attribution_plurality_support,
+            "final_speaker": final_speaker,
+            "final_panel_support": final_panel_support,
+            "final_panel_size": final_panel_size,
+            "scene_support_for_final": scene_support_for_final,
+            "final_support_for_attribution_consensus": final_support_for_attribution_consensus,
+            "quote_type": final_card.get("quote_type", baseline_evidence.get("quote_type", "unclear")),
+            "evidence_basis": final_card.get("evidence_basis", "unknown"),
+            "confidence": final_card.get("confidence", "low"),
+            "citations": final_card.get("citations", []),
+        }
+
+    @classmethod
+    def _apply_split_neighbor_result(cls, decision, baseline, plurality,
+                                     previous_cards, next_cards):
+        updated = dict(decision)
+        valid_previous = [card for card in previous_cards if card.get("valid")]
+        valid_next = [card for card in next_cards if card.get("valid")]
+        previous_consensus, previous_support = cls._speaker_vote_consensus(
+            [card.get("speaker") for card in valid_previous],
+            2,
+        )
+        next_consensus, next_support = cls._speaker_vote_consensus(
+            [card.get("speaker") for card in valid_next],
+            2,
+        )
+        updated["previous_neighbor_speaker"] = previous_consensus
+        updated["previous_neighbor_support"] = previous_support
+        updated["next_neighbor_speaker"] = next_consensus
+        updated["next_neighbor_support"] = next_support
+        if (
+            previous_support >= 2
+            and next_support >= 2
+            and cls._same_speaker(previous_consensus, baseline)
+            and cls._same_speaker(next_consensus, baseline)
+            and plurality
+            and not cls._same_speaker(plurality, baseline)
+        ):
+            updated["speaker"] = plurality
+            updated["baseline_changed"] = True
+            updated["selection_source"] = "split-neighbor-anchor-correction"
+            updated["confirmed_anchor"] = False
+        return updated
+
+    def decide(self, novel_lines, dialogue_list, line_num, dialogue, baseline,
+               baseline_evidence, round_log):
+        calls_before = self.model_call_count
+        packet = build_dialogue_packet(
+            novel_lines,
+            dialogue_list,
+            line_num,
+            dialogue,
+            dialogue_radius=self.dialogue_radius,
+            raw_padding=8,
+        )
+        packet_text = format_dialogue_packet(packet, max_raw_chars=22000)
+        local_packet = build_dialogue_packet(
+            novel_lines,
+            dialogue_list,
+            line_num,
+            dialogue,
+            dialogue_radius=min(5, self.dialogue_radius),
+            raw_padding=6,
+        )
+        local_packet_text = format_dialogue_packet(local_packet, max_raw_chars=12000)
+        target = packet["target"]
+        quote_common = (
+            "The TARGET is one exact quoted occurrence, not every quotation on its raw line. "
+            "Classify whether a person actually utters that exact span. Embedded wording, labels, "
+            "writing, remembered wording, facial expressions, eye messages, and object sounds are not "
+            "automatically character speech. A human-made sigh or cry is person speech when the raw text "
+            "binds the sound to that person. Cite only supplied raw lines.\n\n"
+        )
+        quote_prompts = [
+            (
+                "QuoteSyntaxAudit",
+                "Audit the grammatical container of the TARGET quote. Ignore character identity and topic. "
+                "Determine whether the typography is actual utterance or quotation embedded in narration. ",
+            ),
+            (
+                "QuoteAdversarialAudit",
+                "Assume a nearby character assignment may be a false positive. Search specifically for wording "
+                "that makes the TARGET thought, text, metaphorical message, or sound rather than speech. ",
+            ),
+            (
+                "QuoteSceneAudit",
+                "Read the surrounding scene and decide whether anyone in the scene actually produces the exact "
+                "TARGET span. Do not identify the speaker; classify voice kind only. ",
+            ),
+        ]
+        quote_cards = []
+        total_pec = 0
+        total_ec = 0
+        for agent_name, instruction in quote_prompts:
+            card, pec, ec = self._run_xml_agent(
+                agent_name,
+                "independent_quote_audit",
+                instruction + quote_common + self._quote_output_format(),
+                local_packet_text,
+                round_log,
+                local_packet,
+                "quote",
+            )
+            quote_cards.append(card)
+            total_pec += pec
+            total_ec += ec
+
+        local_solver_instruction = (
+            "Solve the target-centered block from its first turn to its last turn. Assign every displayed turn "
+            "chronologically before returning only the TARGET speaker. Check immediate narrative on both sides. "
+            "When the turns on both sides belong to one participant, explicitly test TARGET as the intervening "
+            "reply from another participant."
+        )
+        attribution_prompts = [
+            (f"LocalChronologyAudit{index}", local_solver_instruction, local_packet_text, local_packet)
+            for index in range(1, 6)
+        ]
+        speaker_common = (
+            " Use only this novel's raw text. Copy a Chinese name or stable unnamed role exactly from the source; "
+            "never translate or romanize it. A mentioned person or addressee is not necessarily the speaker. "
+            "A line discussing a character's identity, occupation, species, belongings, or interests is not evidence "
+            "that the character speaks it. Do not use outside knowledge or novel-specific assumptions. "
+            + self._speaker_output_format()
+        )
+        attribution_cards = []
+        for agent_name, instruction, content, evidence_packet in attribution_prompts:
+            card, pec, ec = self._run_xml_agent(
+                agent_name,
+                "independent_scene_attribution",
+                instruction + speaker_common,
+                content,
+                round_log,
+                evidence_packet,
+                "speaker",
+            )
+            attribution_cards.append(card)
+            total_pec += pec
+            total_ec += ec
+
+        candidate_labels = []
+        for candidate in [baseline] + [card.get("speaker") for card in attribution_cards]:
+            cleaned = validate_char_name(candidate)
+            if cleaned and is_valid_final_speaker(cleaned) and not any(
+                self._same_speaker(cleaned, existing) for existing in candidate_labels
+            ):
+                candidate_labels.append(cleaned)
+        candidate_labels.sort(key=lambda value: (sum(ord(ch) for ch in value) + line_num) % 997)
+        valid_attribution_labels = [
+            card.get("speaker") for card in attribution_cards if card.get("valid")
+        ]
+        candidate_support = {
+            label: sum(self._same_speaker(label, vote) for vote in valid_attribution_labels)
+            for label in candidate_labels
+        }
+        quote_vote_summary = Counter(
+            card.get("voice_kind") for card in quote_cards if card.get("valid")
+        )
+        final_user = (
+            f"{local_packet_text}\n\n[Anonymous candidate labels; order carries no meaning]\n"
+            + "\n".join(
+                f"  Candidate {idx + 1}: {label} | independent scene support "
+                f"{candidate_support.get(label, 0)}/{len(attribution_cards)}"
+                for idx, label in enumerate(candidate_labels)
+            )
+            + f"\n\n[Independent quote-kind vote counts]\n{dict(quote_vote_summary)}"
+        )
+        final_common = (
+            " Re-read the raw scene yourself. Candidate labels are hypotheses and no prior reasoning is available. "
+            "If the exact target is narration, embedded wording, written text, or an object/ambient sound that "
+            "nobody utters, select 非人物发声. Copy Chinese labels from the source and do not invent or romanize "
+            "names. Topic, persona, species, occupation, presumed pronoun habits, and characteristic vocabulary "
+            "are invalid evidence unless the raw text independently binds the exact target quote to that speaker. "
+            "Cite target-bound raw lines. " + self._speaker_output_format()
+        )
+        final_prompts = [
+            (
+                "FinalEvidenceJudge",
+                "Judge by exact grammatical quote binding and immediate narrative on both sides.",
+            ),
+            (
+                "FinalTurnSequenceJudge",
+                "Assign every displayed turn chronologically, including both neighbors of TARGET, before selecting "
+                "TARGET. Do not infer who uses a pronoun from outside knowledge; derive it from this raw block.",
+            ),
+            (
+                "FinalCandidateChallengeJudge",
+                "Find the candidate with the strongest independent scene support, then actively try to falsify it. "
+                "Reject it only for a direct raw-text contradiction; a topic or presumed speech habit is not one.",
+            ),
+        ]
+        final_cards = []
+        for agent_name, instruction in final_prompts:
+            card, pec, ec = self._run_xml_agent(
+                agent_name,
+                "raw_evidence_final_judge",
+                instruction + final_common,
+                final_user,
+                round_log,
+                local_packet,
+                "speaker",
+            )
+            final_cards.append(card)
+            total_pec += pec
+            total_ec += ec
+        valid_final_cards = [card for card in final_cards if card.get("valid")]
+        final_consensus, final_support = self._speaker_vote_consensus(
+            [card.get("speaker") for card in valid_final_cards],
+            2,
+        )
+        if final_consensus:
+            final_card = next(
+                dict(card) for card in valid_final_cards
+                if self._same_speaker(final_consensus, card.get("speaker"))
+            )
+            final_card["speaker"] = final_consensus
+            final_card["valid"] = True
+        else:
+            final_card = {
+                "speaker": "",
+                "quote_type": "unclear",
+                "evidence_basis": "unknown",
+                "confidence": "low",
+                "citations": [],
+                "reason": "final judge panel did not reach unanimous agreement",
+                "valid": False,
+            }
+        final_card["panel_support"] = final_support
+        final_card["panel_size"] = len(final_cards)
+        final_card["panel_speakers"] = [
+            card.get("speaker") for card in valid_final_cards if card.get("speaker")
+        ]
+
+        decision = self._select_decision(
+            baseline,
+            baseline_evidence or {},
+            quote_cards,
+            attribution_cards,
+            final_card,
+            packet,
+        )
+        previous_neighbor_cards = []
+        next_neighbor_cards = []
+        baseline_clean = validate_char_name(baseline) or baseline
+        plurality = decision.get("attribution_plurality") or ""
+        local_target_index = next(
+            index for index, turn in enumerate(local_packet["turns"])
+            if turn.get("is_target")
+        )
+        if (
+            decision.get("selection_source") == "baseline-retained"
+            and decision.get("attribution_plurality_support", 0) >= 3
+            and is_valid_final_speaker(baseline_clean)
+            and is_valid_final_speaker(plurality)
+            and baseline_clean != NON_PERSON_LABEL
+            and plurality != NON_PERSON_LABEL
+            and not self._same_speaker(baseline_clean, plurality)
+            and 0 < local_target_index < len(local_packet["turns"]) - 1
+        ):
+            neighbor_turns = {
+                "Previous": local_packet["turns"][local_target_index - 1],
+                "Next": local_packet["turns"][local_target_index + 1],
+            }
+            for side, turn in neighbor_turns.items():
+                neighbor_system = (
+                    f"Identify only the {side.upper()} neighboring dialogue turn {turn['id']} at "
+                    f"L{turn['line']}: {turn['text']}. Do not identify or discuss the TARGET speaker. "
+                    "Use that neighbor turn's own immediate narrative attribution and actions. Do not use topic, "
+                    "persona, species, occupation, or presumed pronoun habits. "
+                    + self._speaker_output_format()
+                )
+                destination = previous_neighbor_cards if side == "Previous" else next_neighbor_cards
+                for index in range(1, 4):
+                    card, pec, ec = self._run_xml_agent(
+                        f"{side}NeighborAudit{index}",
+                        "single_neighbor_anchor_audit",
+                        neighbor_system,
+                        local_packet_text,
+                        round_log,
+                        local_packet,
+                        "speaker",
+                    )
+                    destination.append(card)
+                    total_pec += pec
+                    total_ec += ec
+            decision = self._apply_split_neighbor_result(
+                decision,
+                baseline_clean,
+                plurality,
+                previous_neighbor_cards,
+                next_neighbor_cards,
+            )
+        metadata = {
+            "decision": decision,
+            "packet": {
+                "raw_start": packet["raw_start"],
+                "raw_end": packet["raw_end"],
+                "target_dialogue_index": target["dialogue_index"],
+                "turn_count": len(packet["turns"]),
+            },
+            "quote_reviews": [
+                {key: value for key, value in card.items() if key != "raw"}
+                for card in quote_cards
+            ],
+            "attribution_reviews": [
+                {key: value for key, value in card.items() if key != "raw"}
+                for card in attribution_cards
+            ],
+            "final_reviews": [
+                {key: value for key, value in card.items() if key != "raw"}
+                for card in final_cards
+            ],
+            "final_review": {key: value for key, value in final_card.items() if key != "raw"},
+            "previous_neighbor_reviews": [
+                {key: value for key, value in card.items() if key != "raw"}
+                for card in previous_neighbor_cards
+            ],
+            "next_neighbor_reviews": [
+                {key: value for key, value in card.items() if key != "raw"}
+                for card in next_neighbor_cards
+            ],
+            "model_calls": self.model_call_count - calls_before,
+        }
+        reason = (
+            f"quality_audit={decision['selection_source']}; baseline={decision['baseline_speaker']}; "
+            f"quote_votes={decision['quote_votes']}; scene_consensus={decision['attribution_consensus'] or 'none'}; "
+            f"final={decision['final_speaker'] or 'invalid'}; "
+            f"neighbors={decision.get('previous_neighbor_speaker') or 'none'}/"
+            f"{decision.get('next_neighbor_speaker') or 'none'}"
+        )
+        summary = f"{decision['speaker']} | {dialogue[:80]}"
+        return decision["speaker"], summary, reason, total_pec, total_ec, metadata
+
+
+# ============================================================
 # Quality Ensemble - blind, block-level attribution
 # ============================================================
 
@@ -3278,8 +4003,8 @@ class QualityEnsemble:
 
 class Boss:
     def __init__(self, short_mem_rounds=20, decision_mode=None):
-        self.decision_mode = (decision_mode or DECISION_MODE or "ensemble").strip().lower()
-        if self.decision_mode not in {"ensemble", "legacy"}:
+        self.decision_mode = (decision_mode or DECISION_MODE or "quality").strip().lower()
+        if self.decision_mode not in {"quality", "ensemble", "legacy"}:
             raise ValueError(f"Unsupported decision mode: {self.decision_mode}")
         self.labeler = LabelerAgent()
         self.verifier = VerifierAgent()
@@ -3288,6 +4013,7 @@ class Boss:
         with open(NOVEL_PATH, "r", encoding="utf-8") as f:
             self.novel_lines = f.readlines()
         self.ensemble = QualityEnsemble()
+        self.quality_audit = QualityAudit()
         self.total_tokens = 0
         self.round_count = 0
         self.search_agent_triggers = 0
@@ -3630,8 +4356,47 @@ class Boss:
         # 5. Decide from raw text. Quality mode keeps blind reviewers separate
         # from provisional memory; legacy mode remains available for comparison.
         ensemble_metadata = None
+        audit_metadata = None
+        baseline_speaker = ""
         confirmed_anchor = False
-        if self.decision_mode == "ensemble":
+        if self.decision_mode == "quality":
+            baseline_speaker, baseline_summary, baseline_reason, base_pec, base_ec, tool_rounds_used = self.labeler.label(
+                line_num, dialogue, short_mem_text, "",
+                evidence_text, navigation_text, "",
+                round_log, quiet=quiet, override_force_tool=True,
+                recent_speakers_hint=recent_speakers_hint,
+                structure_hint=structure_hint,
+                local_evidence_hint=local_evidence_hint,
+            )
+            baseline_evidence = dict(round_log.get("labeler_evidence", {}))
+            speaker, summary, audit_reason, audit_pec, audit_ec, audit_metadata = self.quality_audit.decide(
+                self.novel_lines,
+                self.dialogue_list,
+                line_num,
+                dialogue,
+                baseline_speaker,
+                baseline_evidence,
+                round_log,
+            )
+            pec = base_pec + audit_pec
+            ec = base_ec + audit_ec
+            reason_text = (
+                f"baseline={baseline_speaker}: {baseline_reason} | {audit_reason}"
+            )[:1000]
+            decision = audit_metadata["decision"]
+            confirmed_anchor = bool(decision.get("confirmed_anchor"))
+            round_log["quality_audit"] = audit_metadata
+            round_log["labeler_evidence"] = {
+                "quote_type": decision.get("quote_type", baseline_evidence.get("quote_type", "unclear")),
+                "evidence_basis": decision.get("evidence_basis", "unknown"),
+                "confidence": decision.get("confidence", "low"),
+            }
+            if not quiet:
+                self._safe_print(
+                    f"  Quality audit: {baseline_speaker} -> {speaker} "
+                    f"(source={decision.get('selection_source')}, anchor={confirmed_anchor})"
+                )
+        elif self.decision_mode == "ensemble":
             speaker, summary, reason_text, pec, ec, ensemble_metadata = self.ensemble.decide(
                 self.novel_lines,
                 self.dialogue_list,
@@ -3666,6 +4431,21 @@ class Boss:
             confirmed_anchor = True
             if not quiet:
                 self._safe_print(f"  Labeler: {speaker} (tools={tool_rounds_used})")
+
+        if not is_valid_final_speaker(speaker):
+            if is_valid_final_speaker(baseline_speaker):
+                invalid_speaker = speaker
+                speaker = validate_char_name(baseline_speaker)
+                reason_text = (
+                    f"{reason_text} | Output guard rejected {invalid_speaker!r}; retained baseline {speaker}"
+                )[:1000]
+                if audit_metadata is not None:
+                    audit_metadata["decision"]["output_guard_rejected"] = invalid_speaker
+                    audit_metadata["decision"]["speaker"] = speaker
+                    audit_metadata["decision"]["selection_source"] = "output-guard-baseline"
+            else:
+                speaker = "?"
+                confirmed_anchor = False
         self.total_tokens += pec + ec
         round_log["annotation_tokens"] = pec + ec
 
@@ -3819,6 +4599,8 @@ class Boss:
         }
         if ensemble_metadata is not None:
             ensemble_metadata["final_speaker"] = speaker
+        if audit_metadata is not None:
+            audit_metadata["final_speaker"] = speaker
 
         return speaker
 
@@ -3977,16 +4759,21 @@ def _writeline(msg):
 def main():
     global API_MODEL_FILTER, API_MODEL_PRIORITY, MODEL_PROVIDER, API_RETRIES, API_RETRY_DELAY
     global DECISION_MODE, DIALOGUE_BLOCK_RADIUS, QUALITY_REQUEST_TIMEOUT
+    global QUALITY_SCENE_RADIUS, QUALITY_AUDIT_RETRIES
     parser = argparse.ArgumentParser(description="Multi-agent novel dialogue speaker annotation v4")
     parser.add_argument("--start", type=int, default=0, help="Start from dialogue index (0=resume)")
     parser.add_argument("--count", type=int, default=1, help="Number of dialogues to annotate")
     parser.add_argument("--short-mem", type=int, default=20, help="Short-term memory rounds")
-    parser.add_argument("--decision-mode", choices=["ensemble", "legacy"], default=DECISION_MODE,
-                        help="Annotation decision path: blind block-level ensemble (default) or legacy pipeline")
+    parser.add_argument("--decision-mode", choices=["quality", "ensemble", "legacy"], default=DECISION_MODE,
+                        help="Annotation path: baseline-preserving quality audit (default), experimental ensemble, or legacy")
     parser.add_argument("--dialogue-block-radius", type=int, default=DIALOGUE_BLOCK_RADIUS,
                         help="Neighboring dialogue turns on each side for quality-mode block review")
     parser.add_argument("--quality-request-timeout", type=int, default=QUALITY_REQUEST_TIMEOUT,
                         help="Seconds before one quality-review API call fails over to another model")
+    parser.add_argument("--quality-scene-radius", type=int, default=QUALITY_SCENE_RADIUS,
+                        help="Neighboring dialogue turns on each side for baseline-preserving quality audit")
+    parser.add_argument("--quality-audit-retries", type=int, default=QUALITY_AUDIT_RETRIES,
+                        help="Fresh full-decision attempts after malformed quality-audit output")
     parser.add_argument("--validate", action="store_true", help="Run validation after annotation")
     parser.add_argument("--error-limit", type=int, default=_env_int("NOVEL_VALIDATE_ERROR_LIMIT", 30),
                         help="Validation error rows to print; 0 means all")
@@ -4039,6 +4826,13 @@ def main():
     DECISION_MODE = args.decision_mode
     DIALOGUE_BLOCK_RADIUS = max(1, args.dialogue_block_radius)
     QUALITY_REQUEST_TIMEOUT = max(1, args.quality_request_timeout)
+    QUALITY_SCENE_RADIUS = max(4, args.quality_scene_radius)
+    QUALITY_AUDIT_RETRIES = max(1, args.quality_audit_retries)
+    if DECISION_MODE == "quality" and MODEL_PROVIDER == "api-fallback":
+        if not API_MODEL_FILTER:
+            API_MODEL_FILTER = "sense-nova"
+        elif "sense" not in API_MODEL_FILTER.lower():
+            parser.error("quality decision mode currently permits SenseNova API models only")
 
     print("=" * 60)
     print("  Multi-agent Novel Dialogue Speaker Annotation v4")
@@ -4061,7 +4855,11 @@ def main():
         print(f"  API health check: {args.health_check}")
     print(f"  Short-term memory: {args.short_mem} rounds")
     print(f"  Decision mode: {DECISION_MODE}")
-    if DECISION_MODE == "ensemble":
+    if DECISION_MODE == "quality":
+        print(f"  Quality scene radius: {QUALITY_SCENE_RADIUS} turns per side")
+        print(f"  Quality audit retries: {QUALITY_AUDIT_RETRIES}")
+        print(f"  Quality request timeout: {QUALITY_REQUEST_TIMEOUT}s")
+    elif DECISION_MODE == "ensemble":
         print(f"  Dialogue block radius: {DIALOGUE_BLOCK_RADIUS} turns per side")
         print(f"  Quality request timeout: {QUALITY_REQUEST_TIMEOUT}s")
     print(f"  Token budget: {TOKEN_BUDGET}")
@@ -4201,7 +4999,10 @@ def main():
         batch_tool_calls += len(round_log.get("tool_calls", []))
         labeler = round_log.get("agents", {}).get("Labeler", {})
         batch_tokens += round_log.get("annotation_tokens", labeler.get("total_tokens", 0))
-        batch_model_calls += round_log.get("quality_ensemble", {}).get("model_calls", 0)
+        batch_model_calls += (
+            round_log.get("quality_audit", {}).get("model_calls", 0)
+            + round_log.get("quality_ensemble", {}).get("model_calls", 0)
+        )
 
         done = idx - start_idx + 1
         elapsed = time.time() - start_time
@@ -4226,7 +5027,10 @@ def main():
     _writeline(f"\n{'='*60}")
     _writeline(f"  Annotation complete")
     _writeline(f"  Dialogues annotated: {end_idx - start_idx}")
-    _writeline(f"  Quality ensemble model calls: {boss.ensemble.model_call_count}")
+    _writeline(
+        "  Quality review model calls: "
+        f"{boss.quality_audit.model_call_count + boss.ensemble.model_call_count}"
+    )
     _writeline(f"  Tool calls: {boss.labeler.tool_call_count}")
     _writeline(f"  SearchAgent triggers: {boss.search_agent_triggers}")
     _writeline(f"  Corrections: {boss.corrections}")
