@@ -37,6 +37,7 @@ from dialogue_ensemble import (
     get_tag as get_ensemble_tag,
     parse_line_citations,
 )
+from scene_quality import SceneQualityRuntime, SceneSequenceAudit
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(SCRIPT_DIR)
@@ -70,7 +71,7 @@ MODEL_PROVIDER = "ollama"
 API_MODEL_FILTER = ""
 API_MODEL_PRIORITY = []
 API_CONTEXT_LIMIT = 40000
-API_MAX_OUTPUT_TOKENS = 2048
+API_MAX_OUTPUT_TOKENS = 4096
 API_RETRIES = 3
 API_RETRY_DELAY = 5.0
 API_CALL_TRACE = []
@@ -96,9 +97,13 @@ def _env_float(name, default):
 
 
 DIALOGUE_BLOCK_RADIUS = _env_int("NOVEL_DIALOGUE_BLOCK_RADIUS", 4)
-QUALITY_REQUEST_TIMEOUT = _env_int("NOVEL_QUALITY_REQUEST_TIMEOUT", 120)
+QUALITY_REQUEST_TIMEOUT = _env_int("NOVEL_QUALITY_REQUEST_TIMEOUT", 300)
 QUALITY_SCENE_RADIUS = _env_int("NOVEL_QUALITY_SCENE_RADIUS", 12)
 QUALITY_AUDIT_RETRIES = max(1, _env_int("NOVEL_QUALITY_AUDIT_RETRIES", 2))
+SCENE_MAX_TURNS = max(4, _env_int("NOVEL_SCENE_MAX_TURNS", 6))
+SCENE_MAX_RAW_SPAN = max(30, _env_int("NOVEL_SCENE_MAX_RAW_SPAN", 180))
+SCENE_DEEP_TOOL_ROUNDS = max(1, _env_int("NOVEL_SCENE_DEEP_TOOL_ROUNDS", 8))
+SCENE_DEEP_TOKEN_BUDGET = max(8000, _env_int("NOVEL_SCENE_DEEP_TOKEN_BUDGET", 60000))
 
 
 def _resolve_workspace_path(path_value):
@@ -831,7 +836,19 @@ def compact_text(text, max_chars, keep="tail"):
 def call_api_fallback(messages, tools=None, label="", request_timeout=None, tool_choice="auto"):
     global API_CALL_TRACE
     needs_tools = bool(tools)
-    expects_tool = _expects_tool_call(messages, tools)
+    prompt_requires_read = _expects_tool_call(messages, tools)
+    explicit_tool_name = ""
+    if isinstance(tool_choice, dict):
+        explicit_tool_name = str(
+            (tool_choice.get("function") or {}).get("name") or ""
+        ).strip()
+    expects_tool = bool(
+        tools and (
+            prompt_requires_read
+            or tool_choice == "required"
+            or explicit_tool_name
+        )
+    )
     effective_timeout = max(1, int(request_timeout or 300))
     errors = []
     max_attempts = max(1, int(API_RETRIES or 1))
@@ -841,7 +858,7 @@ def call_api_fallback(messages, tools=None, label="", request_timeout=None, tool
         for attempt in range(1, max_attempts + 1):
             try:
                 effective_tool_choice = tool_choice
-                if expects_tool and model.name != "agnes":
+                if prompt_requires_read and tool_choice == "auto" and model.name != "agnes":
                     effective_tool_choice = {"type": "function", "function": {"name": "read_novel_lines"}}
                 temp_log_event(
                     "model_call_start",
@@ -905,6 +922,18 @@ def call_api_fallback(messages, tools=None, label="", request_timeout=None, tool
                     err = f"{model.label}: no tool call"
                     if attempt < max_attempts:
                         errors.append(f"{err} (attempt {attempt}/{max_attempts})")
+                        if model.round_robin_group:
+                            temp_log_event(
+                                "model_call_failover",
+                                label=label,
+                                provider=model.name,
+                                model=model.model,
+                                model_label=model.label,
+                                round_robin_group=model.round_robin_group,
+                                attempt=attempt,
+                                reason="missing required tool call; trying next round-robin member",
+                            )
+                            break
                         temp_log_event(
                             "model_call_retry",
                             label=label,
@@ -1270,7 +1299,7 @@ def get_narrative_before(line_num, max_lines=5):
     return " | ".join(narrative) if narrative else ""
 
 
-def deep_search_identity(temp_name, around_line, search_forward=200, search_backward=100):
+def deep_search_identity(temp_name, around_line, search_forward=1200, search_backward=200):
     """Search for identity clues for a temporary descriptor near a line."""
     with open(NOVEL_PATH, "r", encoding="utf-8") as f:
         lines = f.readlines()
@@ -4004,7 +4033,7 @@ class QualityEnsemble:
 class Boss:
     def __init__(self, short_mem_rounds=20, decision_mode=None):
         self.decision_mode = (decision_mode or DECISION_MODE or "quality").strip().lower()
-        if self.decision_mode not in {"quality", "ensemble", "legacy"}:
+        if self.decision_mode not in {"quality", "quality-v1", "ensemble", "legacy"}:
             raise ValueError(f"Unsupported decision mode: {self.decision_mode}")
         self.labeler = LabelerAgent()
         self.verifier = VerifierAgent()
@@ -4014,6 +4043,37 @@ class Boss:
             self.novel_lines = f.readlines()
         self.ensemble = QualityEnsemble()
         self.quality_audit = QualityAudit()
+        scene_runtime = SceneQualityRuntime(
+            call_model=call_ollama,
+            parse_tool_arguments=parse_tool_arguments,
+            normalize_tool_call=normalize_tool_call,
+            log_agent=log_agent,
+            trace_tool_result=trace_tool_result,
+            temp_log_event=temp_log_event,
+            read_novel_lines=read_novel_lines,
+            search_novel=search_novel,
+            validate_speaker=validate_char_name,
+            is_valid_speaker=is_valid_final_speaker,
+            is_generic_speaker=is_generic_speaker_label,
+            same_speaker=QualityAudit._same_speaker,
+            estimate_messages=_estimate_message_tokens,
+            read_tool=TOOL_READ_NOVEL,
+            search_tool=TOOL_SEARCH_NOVEL,
+            non_person_label=NON_PERSON_LABEL,
+            request_timeout=QUALITY_REQUEST_TIMEOUT,
+            retries=QUALITY_AUDIT_RETRIES,
+            deep_tool_rounds=SCENE_DEEP_TOOL_ROUNDS,
+            deep_token_budget=SCENE_DEEP_TOKEN_BUDGET,
+            context_limit=API_CONTEXT_LIMIT,
+            max_output_tokens=API_MAX_OUTPUT_TOKENS,
+        )
+        self.scene_quality = SceneSequenceAudit(
+            self.novel_lines,
+            self.dialogue_list,
+            scene_runtime,
+            max_scene_turns=SCENE_MAX_TURNS,
+            max_scene_raw_span=SCENE_MAX_RAW_SPAN,
+        )
         self.total_tokens = 0
         self.round_count = 0
         self.search_agent_triggers = 0
@@ -4357,9 +4417,10 @@ class Boss:
         # from provisional memory; legacy mode remains available for comparison.
         ensemble_metadata = None
         audit_metadata = None
+        scene_metadata = None
         baseline_speaker = ""
         confirmed_anchor = False
-        if self.decision_mode == "quality":
+        if self.decision_mode in {"quality", "quality-v1"}:
             baseline_speaker, baseline_summary, baseline_reason, base_pec, base_ec, tool_rounds_used = self.labeler.label(
                 line_num, dialogue, short_mem_text, "",
                 evidence_text, navigation_text, "",
@@ -4369,23 +4430,47 @@ class Boss:
                 local_evidence_hint=local_evidence_hint,
             )
             baseline_evidence = dict(round_log.get("labeler_evidence", {}))
-            speaker, summary, audit_reason, audit_pec, audit_ec, audit_metadata = self.quality_audit.decide(
-                self.novel_lines,
-                self.dialogue_list,
-                line_num,
-                dialogue,
-                baseline_speaker,
-                baseline_evidence,
-                round_log,
-            )
-            pec = base_pec + audit_pec
-            ec = base_ec + audit_ec
-            reason_text = (
-                f"baseline={baseline_speaker}: {baseline_reason} | {audit_reason}"
-            )[:1000]
-            decision = audit_metadata["decision"]
+            if self.decision_mode == "quality":
+                dialogue_index = local_structure.get("index")
+                if dialogue_index is None:
+                    raise ValueError(f"Target dialogue not found in dialogue list: L{line_num}")
+                speaker, summary, scene_reason, scene_pec, scene_ec, scene_metadata = self.scene_quality.decide(
+                    dialogue_index,
+                    line_num,
+                    dialogue,
+                    baseline_speaker,
+                    baseline_evidence,
+                    baseline_reason,
+                    local_evidence,
+                    round_log,
+                )
+                pec = base_pec + scene_pec
+                ec = base_ec + scene_ec
+                reason_text = (
+                    f"baseline={baseline_speaker}: {baseline_reason} | {scene_reason}"
+                )[:1000]
+                decision = scene_metadata["decision"]
+                round_log["scene_sequence_quality"] = scene_metadata
+                mode_label = "Scene quality"
+            else:
+                speaker, summary, audit_reason, audit_pec, audit_ec, audit_metadata = self.quality_audit.decide(
+                    self.novel_lines,
+                    self.dialogue_list,
+                    line_num,
+                    dialogue,
+                    baseline_speaker,
+                    baseline_evidence,
+                    round_log,
+                )
+                pec = base_pec + audit_pec
+                ec = base_ec + audit_ec
+                reason_text = (
+                    f"baseline={baseline_speaker}: {baseline_reason} | {audit_reason}"
+                )[:1000]
+                decision = audit_metadata["decision"]
+                round_log["quality_audit"] = audit_metadata
+                mode_label = "Quality v1 audit"
             confirmed_anchor = bool(decision.get("confirmed_anchor"))
-            round_log["quality_audit"] = audit_metadata
             round_log["labeler_evidence"] = {
                 "quote_type": decision.get("quote_type", baseline_evidence.get("quote_type", "unclear")),
                 "evidence_basis": decision.get("evidence_basis", "unknown"),
@@ -4393,7 +4478,7 @@ class Boss:
             }
             if not quiet:
                 self._safe_print(
-                    f"  Quality audit: {baseline_speaker} -> {speaker} "
+                    f"  {mode_label}: {baseline_speaker} -> {speaker} "
                     f"(source={decision.get('selection_source')}, anchor={confirmed_anchor})"
                 )
         elif self.decision_mode == "ensemble":
@@ -4443,6 +4528,10 @@ class Boss:
                     audit_metadata["decision"]["output_guard_rejected"] = invalid_speaker
                     audit_metadata["decision"]["speaker"] = speaker
                     audit_metadata["decision"]["selection_source"] = "output-guard-baseline"
+                if scene_metadata is not None:
+                    scene_metadata["decision"]["output_guard_rejected"] = invalid_speaker
+                    scene_metadata["decision"]["speaker"] = speaker
+                    scene_metadata["decision"]["selection_source"] = "output-guard-baseline"
             else:
                 speaker = "?"
                 confirmed_anchor = False
@@ -4471,7 +4560,10 @@ class Boss:
                     pass
 
             search_result, s_pec, s_ec, s_tool_log = self.search_agent.investigate(
-                speaker, line_num, max_tool_rounds=4, quiet=quiet
+                speaker,
+                line_num,
+                max_tool_rounds=8 if self.decision_mode == "quality" else 4,
+                quiet=quiet,
             )
             self.total_tokens += s_pec + s_ec
 
@@ -4601,6 +4693,8 @@ class Boss:
             ensemble_metadata["final_speaker"] = speaker
         if audit_metadata is not None:
             audit_metadata["final_speaker"] = speaker
+        if scene_metadata is not None:
+            scene_metadata["final_speaker"] = speaker
 
         return speaker
 
@@ -4760,20 +4854,34 @@ def main():
     global API_MODEL_FILTER, API_MODEL_PRIORITY, MODEL_PROVIDER, API_RETRIES, API_RETRY_DELAY
     global DECISION_MODE, DIALOGUE_BLOCK_RADIUS, QUALITY_REQUEST_TIMEOUT
     global QUALITY_SCENE_RADIUS, QUALITY_AUDIT_RETRIES
+    global SCENE_MAX_TURNS, SCENE_MAX_RAW_SPAN
+    global SCENE_DEEP_TOOL_ROUNDS, SCENE_DEEP_TOKEN_BUDGET
     parser = argparse.ArgumentParser(description="Multi-agent novel dialogue speaker annotation v4")
     parser.add_argument("--start", type=int, default=0, help="Start from dialogue index (0=resume)")
     parser.add_argument("--count", type=int, default=1, help="Number of dialogues to annotate")
     parser.add_argument("--short-mem", type=int, default=20, help="Short-term memory rounds")
-    parser.add_argument("--decision-mode", choices=["quality", "ensemble", "legacy"], default=DECISION_MODE,
-                        help="Annotation path: baseline-preserving quality audit (default), experimental ensemble, or legacy")
+    parser.add_argument(
+        "--decision-mode",
+        choices=["quality", "quality-v1", "ensemble", "legacy"],
+        default=DECISION_MODE,
+        help="Annotation path: scene evidence chain (default), archived quality-v1, ensemble, or legacy",
+    )
     parser.add_argument("--dialogue-block-radius", type=int, default=DIALOGUE_BLOCK_RADIUS,
                         help="Neighboring dialogue turns on each side for quality-mode block review")
     parser.add_argument("--quality-request-timeout", type=int, default=QUALITY_REQUEST_TIMEOUT,
                         help="Seconds before one quality-review API call fails over to another model")
     parser.add_argument("--quality-scene-radius", type=int, default=QUALITY_SCENE_RADIUS,
-                        help="Neighboring dialogue turns on each side for baseline-preserving quality audit")
+                        help="Neighboring dialogue turns per side for archived quality-v1 mode")
     parser.add_argument("--quality-audit-retries", type=int, default=QUALITY_AUDIT_RETRIES,
-                        help="Fresh full-decision attempts after malformed quality-audit output")
+                        help="Fresh structured-result attempts after malformed quality output")
+    parser.add_argument("--scene-max-turns", type=int, default=SCENE_MAX_TURNS,
+                        help="Maximum dialogue turns in one stable quality-mode scene")
+    parser.add_argument("--scene-max-raw-span", type=int, default=SCENE_MAX_RAW_SPAN,
+                        help="Maximum raw line span used when splitting a quality-mode scene")
+    parser.add_argument("--scene-deep-tool-rounds", type=int, default=SCENE_DEEP_TOOL_ROUNDS,
+                        help="Maximum context/search rounds for each target investigator")
+    parser.add_argument("--scene-deep-token-budget", type=int, default=SCENE_DEEP_TOKEN_BUDGET,
+                        help="Cumulative token budget for each target investigator")
     parser.add_argument("--validate", action="store_true", help="Run validation after annotation")
     parser.add_argument("--error-limit", type=int, default=_env_int("NOVEL_VALIDATE_ERROR_LIMIT", 30),
                         help="Validation error rows to print; 0 means all")
@@ -4828,7 +4936,11 @@ def main():
     QUALITY_REQUEST_TIMEOUT = max(1, args.quality_request_timeout)
     QUALITY_SCENE_RADIUS = max(4, args.quality_scene_radius)
     QUALITY_AUDIT_RETRIES = max(1, args.quality_audit_retries)
-    if DECISION_MODE == "quality" and MODEL_PROVIDER == "api-fallback":
+    SCENE_MAX_TURNS = max(4, args.scene_max_turns)
+    SCENE_MAX_RAW_SPAN = max(30, args.scene_max_raw_span)
+    SCENE_DEEP_TOOL_ROUNDS = max(1, args.scene_deep_tool_rounds)
+    SCENE_DEEP_TOKEN_BUDGET = max(8000, args.scene_deep_token_budget)
+    if DECISION_MODE in {"quality", "quality-v1"} and MODEL_PROVIDER == "api-fallback":
         if not API_MODEL_FILTER:
             API_MODEL_FILTER = "sense-nova"
         elif "sense" not in API_MODEL_FILTER.lower():
@@ -4856,7 +4968,12 @@ def main():
     print(f"  Short-term memory: {args.short_mem} rounds")
     print(f"  Decision mode: {DECISION_MODE}")
     if DECISION_MODE == "quality":
-        print(f"  Quality scene radius: {QUALITY_SCENE_RADIUS} turns per side")
+        print(f"  Scene bounds: {SCENE_MAX_TURNS} turns / {SCENE_MAX_RAW_SPAN} raw lines")
+        print(f"  Scene investigators: {SCENE_DEEP_TOOL_ROUNDS} tool rounds / {SCENE_DEEP_TOKEN_BUDGET} tokens")
+        print(f"  Structured result retries: {QUALITY_AUDIT_RETRIES}")
+        print(f"  Quality request timeout: {QUALITY_REQUEST_TIMEOUT}s")
+    elif DECISION_MODE == "quality-v1":
+        print(f"  Archived quality-v1 scene radius: {QUALITY_SCENE_RADIUS} turns per side")
         print(f"  Quality audit retries: {QUALITY_AUDIT_RETRIES}")
         print(f"  Quality request timeout: {QUALITY_REQUEST_TIMEOUT}s")
     elif DECISION_MODE == "ensemble":
@@ -5002,6 +5119,7 @@ def main():
         batch_model_calls += (
             round_log.get("quality_audit", {}).get("model_calls", 0)
             + round_log.get("quality_ensemble", {}).get("model_calls", 0)
+            + round_log.get("scene_sequence_quality", {}).get("model_calls", 0)
         )
 
         done = idx - start_idx + 1
@@ -5029,7 +5147,7 @@ def main():
     _writeline(f"  Dialogues annotated: {end_idx - start_idx}")
     _writeline(
         "  Quality review model calls: "
-        f"{boss.quality_audit.model_call_count + boss.ensemble.model_call_count}"
+        f"{boss.scene_quality.model_call_count + boss.quality_audit.model_call_count + boss.ensemble.model_call_count}"
     )
     _writeline(f"  Tool calls: {boss.labeler.tool_call_count}")
     _writeline(f"  SearchAgent triggers: {boss.search_agent_triggers}")
