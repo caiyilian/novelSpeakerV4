@@ -13,7 +13,9 @@ from dialogue_ensemble import (  # noqa: E402
     parse_line_citations,
 )
 import requests  # noqa: E402
+from unittest.mock import patch  # noqa: E402
 
+import run_label  # noqa: E402
 from run_label import (  # noqa: E402
     ApiModel,
     NON_PERSON_LABEL,
@@ -293,6 +295,55 @@ class ApiFallbackTests(unittest.TestCase):
         timeout = requests.exceptions.ReadTimeout("timed out")
         self.assertTrue(_should_failover_to_next_model(timeout, pooled))
         self.assertFalse(_should_failover_to_next_model(timeout, standalone))
+
+    def test_missing_required_tool_moves_to_next_round_robin_key(self):
+        first = ApiModel(
+            "pooled-a",
+            "model",
+            "https://example.invalid",
+            "key-a",
+            round_robin_group="provider-pool",
+        )
+        second = ApiModel(
+            "pooled-b",
+            "model",
+            "https://example.invalid",
+            "key-b",
+            round_robin_group="provider-pool",
+        )
+        calls = []
+
+        def fake_chat(model, *_args, **_kwargs):
+            calls.append(model.name)
+            if model is first:
+                return "ignored prose", 10, 20, []
+            return "", 10, 20, [{
+                "id": "call-1",
+                "type": "function",
+                "function": {"name": "submit_result", "arguments": "{}"},
+            }]
+
+        tool = {"type": "function", "function": {"name": "submit_result", "parameters": {"type": "object"}}}
+        choice = {"type": "function", "function": {"name": "submit_result"}}
+        old_trace = run_label.API_CALL_TRACE
+        run_label.API_CALL_TRACE = []
+        try:
+            with (
+                patch.object(run_label, "_api_model_iteration_order", return_value=[first, second]),
+                patch.object(run_label, "_api_chat", side_effect=fake_chat),
+                patch.object(run_label, "temp_log_event"),
+                patch.object(run_label, "API_RETRIES", 3),
+            ):
+                _, _, _, tool_calls = run_label.call_api_fallback(
+                    [{"role": "user", "content": "return structured output"}],
+                    tools=[tool],
+                    tool_choice=choice,
+                )
+        finally:
+            run_label.API_CALL_TRACE = old_trace
+
+        self.assertEqual(["pooled-a", "pooled-b"], calls)
+        self.assertEqual("submit_result", tool_calls[0]["function"]["name"])
 
 
 if __name__ == "__main__":
