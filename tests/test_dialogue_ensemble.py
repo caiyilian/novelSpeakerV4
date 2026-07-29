@@ -277,6 +277,58 @@ class BaselinePreservingAuditTests(unittest.TestCase):
 
 
 class ApiFallbackTests(unittest.TestCase):
+    def test_sensenova_pool_uses_every_configured_key(self):
+        provider = {
+            "options": {"baseURL": "https://example.invalid/v1"},
+            "models": {
+                run_label.SENSENOVA_MODEL: {
+                    "id": run_label.SENSENOVA_MODEL,
+                }
+            },
+        }
+        keys = [f"key-{index}" for index in range(1, 8)]
+        models = []
+
+        with (
+            patch.object(run_label, "_load_opencode_provider", return_value=provider),
+            patch.object(run_label, "_load_sensenova_keys", return_value=keys),
+        ):
+            run_label._append_sensenova_models(models)
+
+        self.assertEqual(
+            [f"sense-nova-{index}" for index in range(1, 8)],
+            [model.name for model in models],
+        )
+        self.assertEqual(keys, [model.api_key for model in models])
+        self.assertEqual({"sense-nova"}, {model.round_robin_group for model in models})
+
+        old_models = run_label.API_MODELS
+        old_cursor = run_label.API_ROUND_ROBIN_CURSOR
+        run_label.API_MODELS = models
+        run_label.API_ROUND_ROBIN_CURSOR = {}
+        try:
+            first_models = [
+                run_label._api_model_iteration_order()[0].name
+                for _ in range(8)
+            ]
+        finally:
+            run_label.API_MODELS = old_models
+            run_label.API_ROUND_ROBIN_CURSOR = old_cursor
+
+        self.assertEqual(
+            [
+                "sense-nova-1",
+                "sense-nova-2",
+                "sense-nova-3",
+                "sense-nova-4",
+                "sense-nova-5",
+                "sense-nova-6",
+                "sense-nova-7",
+                "sense-nova-1",
+            ],
+            first_models,
+        )
+
     def test_round_robin_timeout_fails_over_instead_of_retrying_same_key(self):
         pooled = ApiModel(
             "pooled",
@@ -295,6 +347,72 @@ class ApiFallbackTests(unittest.TestCase):
         timeout = requests.exceptions.ReadTimeout("timed out")
         self.assertTrue(_should_failover_to_next_model(timeout, pooled))
         self.assertFalse(_should_failover_to_next_model(timeout, standalone))
+
+    def test_transient_pool_cooldown_waits_then_retries(self):
+        model = ApiModel(
+            "sense-nova-1",
+            "model",
+            "https://example.invalid",
+            "key",
+            round_robin_group="sense-nova",
+        )
+        model.mark_failure(
+            'HTTP 404: {"error":{"message":"model route not found"}}',
+            cooldown=30,
+        )
+        old_models = run_label.API_MODELS
+        run_label.API_MODELS = [model]
+
+        def finish_cooldown(_delay):
+            model.cooldown_until = 0
+
+        try:
+            with (
+                patch.object(
+                    run_label,
+                    "_call_api_fallback_once",
+                    side_effect=[
+                        run_label.ModelCallError("temporary route outage"),
+                        ("OK", 1, 1, []),
+                    ],
+                ) as call_once,
+                patch.object(run_label.time, "sleep", side_effect=finish_cooldown) as sleep,
+                patch.object(run_label, "temp_log_event"),
+            ):
+                result = run_label.call_api_fallback([{"role": "user", "content": "test"}])
+        finally:
+            run_label.API_MODELS = old_models
+
+        self.assertEqual(("OK", 1, 1, []), result)
+        self.assertEqual(2, call_once.call_count)
+        sleep.assert_called_once()
+
+    def test_non_transient_pool_failure_does_not_wait(self):
+        model = ApiModel(
+            "sense-nova-1",
+            "model",
+            "https://example.invalid",
+            "key",
+            round_robin_group="sense-nova",
+        )
+        model.mark_failure("context budget exceeded: estimated 50000 > 40000", cooldown=30)
+        old_models = run_label.API_MODELS
+        run_label.API_MODELS = [model]
+        try:
+            with (
+                patch.object(
+                    run_label,
+                    "_call_api_fallback_once",
+                    side_effect=run_label.ModelCallError("context budget exceeded"),
+                ),
+                patch.object(run_label.time, "sleep") as sleep,
+            ):
+                with self.assertRaises(run_label.ModelCallError):
+                    run_label.call_api_fallback([{"role": "user", "content": "test"}])
+        finally:
+            run_label.API_MODELS = old_models
+
+        sleep.assert_not_called()
 
     def test_missing_required_tool_moves_to_next_round_robin_key(self):
         first = ApiModel(

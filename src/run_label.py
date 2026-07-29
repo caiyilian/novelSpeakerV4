@@ -560,6 +560,12 @@ def init_api_fallback(health_check="all"):
     if not API_MODELS:
         raise ModelCallError("No API fallback models configured. Set ZHIPUAI_API_KEY or configure opencode providers.")
 
+    sensenova_pool_size = sum(
+        model.round_robin_group == "sense-nova" for model in API_MODELS
+    )
+    if sensenova_pool_size:
+        print(f"  SenseNova round-robin pool: {sensenova_pool_size} keys")
+
     if health_check == "none":
         print("  API fallback health check: skipped")
         print("  API fallback order:")
@@ -728,6 +734,62 @@ def _cooldown_for_model_error(exc):
     return 30
 
 
+def _is_transient_api_pool_error(message):
+    lowered = str(message or "").lower()
+    if "http 404" in lowered and "model route not found" in lowered:
+        return True
+    transient_markers = (
+        "http 408",
+        "http 425",
+        "http 429",
+        "http 500",
+        "http 502",
+        "http 503",
+        "http 504",
+        "rate limit",
+        "too many requests",
+        "quota",
+        "insufficient",
+        "timed out",
+        "timeout",
+        "connection aborted",
+        "connection reset",
+        "connectionpool",
+        "max retries exceeded",
+        "proxyerror",
+        "unable to connect",
+        "remotedisconnected",
+        "remote disconnected",
+        "temporarily unavailable",
+    )
+    return any(marker in lowered for marker in transient_markers)
+
+
+def _api_pool_recovery_state(needs_tools):
+    candidates = [
+        model for model in API_MODELS
+        if not model.disabled and (not needs_tools or model.tool_capable)
+    ]
+    if not candidates:
+        return None
+
+    now = time.time()
+    cooling = [model for model in candidates if model.cooldown_until > now]
+    if len(cooling) != len(candidates):
+        return None
+
+    errors = [model.last_error for model in cooling if model.last_error]
+    if not errors or not all(_is_transient_api_pool_error(error) for error in errors):
+        return None
+
+    delay = max(0.1, min(model.cooldown_until for model in cooling) - now)
+    return {
+        "delay": delay,
+        "models": [model.name for model in cooling],
+        "errors": errors,
+    }
+
+
 def _sleep_before_retry(attempt):
     if API_RETRY_DELAY <= 0:
         return
@@ -833,7 +895,7 @@ def compact_text(text, max_chars, keep="tail"):
     return marker + text[-keep_chars:]
 
 
-def call_api_fallback(messages, tools=None, label="", request_timeout=None, tool_choice="auto"):
+def _call_api_fallback_once(messages, tools=None, label="", request_timeout=None, tool_choice="auto"):
     global API_CALL_TRACE
     needs_tools = bool(tools)
     prompt_requires_read = _expects_tool_call(messages, tools)
@@ -1040,6 +1102,41 @@ def call_api_fallback(messages, tools=None, label="", request_timeout=None, tool
     )
     raise ModelCallError(f"All API fallback models failed for {label or 'request'}: {detail}")
 
+
+def call_api_fallback(messages, tools=None, label="", request_timeout=None, tool_choice="auto"):
+    """Keep a temporarily unavailable API pool alive until one member recovers."""
+    needs_tools = bool(tools)
+    while True:
+        try:
+            return _call_api_fallback_once(
+                messages,
+                tools=tools,
+                label=label,
+                request_timeout=request_timeout,
+                tool_choice=tool_choice,
+            )
+        except ModelCallError as exc:
+            recovery = _api_pool_recovery_state(needs_tools)
+            if recovery is None:
+                raise
+
+            delay = recovery["delay"]
+            reason = recovery["errors"][-1][:200]
+            temp_log_event(
+                "model_pool_cooldown_wait",
+                label=label,
+                tools_enabled=needs_tools,
+                wait_seconds=round(delay, 3),
+                providers=recovery["models"],
+                reason=reason,
+                original_error=str(exc)[:1000],
+            )
+            print(
+                f"  [API pool] {len(recovery['models'])} models temporarily unavailable; "
+                f"retrying in {delay:.1f}s ({reason[:100]})"
+            )
+            time.sleep(delay + 0.05)
+
 # Ambiguous descriptive labels that may later resolve to a named character.
 # Keep this generic: do not add novel-specific character names here.
 TEMP_DESCRIPTORS = {
@@ -1239,8 +1336,9 @@ def log_agent(round_log, agent_name, role, input_messages, response_text, pec, e
 # ============================================================
 
 SPEECH_ATTRIBUTION_RE = re.compile(
-    r"(说(?:道|着|完|了)?|问(?:道)?|回答|答道|喊(?:道)?|叫(?:道)?|开口|"
-    r"低语|嘀咕|喃喃|叹(?:道|息)?|笑(?:道)?|补充|继续说|表示)"
+    r"(说(?!不(?:出|上|下|成|定|清|明|来))(?:道|着|完|了)?|问(?:道)?|回答|答道|喊(?:道)?|叫(?:道)?|开口|"
+    r"低语|嘀咕|喃喃|叹(?:道|息)?|笑(?:道)?|补充|继续说|表示|"
+    r"搭腔|搭话|接话|插话|回应|应声)"
 )
 
 
@@ -1676,8 +1774,22 @@ SPEAKER_PRONOUNS = {
 ATTRIBUTION_CLEAN_SPLITS = re.compile(r"[，,。！？；;：:\s]|(?:向|对|朝|冲|跟|和|给|把|被)")
 ATTRIBUTION_VERB_RE = re.compile(
     r"(?P<speaker>[\u4e00-\u9fffA-Za-z0-9·•・]{1,15}(?:向|对|朝|冲|跟|和|给)?[\u4e00-\u9fffA-Za-z0-9·•・]{0,8})"
-    r"(?P<verb>说(?:道|着|完|了)?|问(?:道)?|回答|答道|喊(?:道)?|叫(?:道)?|开口|"
-    r"低语|嘀咕|喃喃|叹(?:道|息)?|笑(?:道)?|补充|继续说|表示|怒吼|大喊|小声说)"
+    r"(?P<verb>说(?!不(?:出|上|下|成|定|清|明|来))(?:道|着|完|了)?|问(?:道)?|回答|答道|喊(?:道)?|叫(?:道)?|开口|"
+    r"低语|嘀咕|喃喃|叹(?:道|息)?|笑(?:道)?|补充|继续说|表示|怒吼|大喊|小声说|"
+    r"搭腔|搭话|接话|插话|回应|应声)"
+)
+ATTRIBUTION_FALSE_SUBJECTS = {
+    "与其", "不如", "所谓", "也就是说", "换句话说", "严格来说", "一般来说",
+}
+DIALOGUE_CONTACT_VERB_PATTERN = r"(?:搭腔|搭话|接话|插话|回应|应声)"
+INVERTED_CONTACT_ATTRIBUTION_RE = re.compile(
+    rf"(?:向|对|朝|跟)[^。！？；]{{1,20}}?(?P<verb>{DIALOGUE_CONTACT_VERB_PATTERN})(?:的)?是"
+    r"(?P<speaker>[\u4e00-\u9fffA-Za-z0-9·•・]{1,15})"
+)
+SUBJECT_CONTACT_ATTRIBUTION_RE = re.compile(
+    r"(?:^|[。！？；])(?P<speaker>[\u4e00-\u9fffA-Za-z0-9·•・]{1,12}?)"
+    r"(?=(?:也|又|先|便|立刻|马上|随即|朝着?|向|对|跟))"
+    rf"[^。！？；]{{0,80}}?(?P<verb>{DIALOGUE_CONTACT_VERB_PATTERN})"
 )
 QUOTE_TYPE_CAUTION_KEYWORDS = (
     "写着", "刻着", "上面写", "牌子", "文字", "读作", "念作", "书上", "信上", "纸上",
@@ -1711,7 +1823,7 @@ def _clean_attribution_candidate(raw):
     candidate = re.sub(r"^(于是|然后|接着|这时|那时|只见|而|但|可是|不过|同时)", "", candidate)
     candidate = re.sub(r"(则|又|也|便|才|却|就|仍|仍然|继续)$", "", candidate)
     candidate = candidate.strip(" 　，,。！？；;：:「」『』（）()[]【】")
-    if candidate in SPEAKER_PRONOUNS:
+    if candidate in SPEAKER_PRONOUNS or candidate in ATTRIBUTION_FALSE_SUBJECTS:
         return ""
     if not re.search(r"[\u4e00-\u9fffA-Za-z]", candidate):
         return ""
@@ -1721,12 +1833,24 @@ def _clean_attribution_candidate(raw):
 def _extract_attribution_candidates(text):
     candidates = []
     for match in ATTRIBUTION_VERB_RE.finditer(text or ""):
+        raw_speaker = str(match.group("speaker") or "")
+        if (
+            match.group("verb") in {"搭腔", "搭话", "接话", "插话", "回应", "应声"}
+            and raw_speaker.startswith(("向", "对", "朝", "跟"))
+            and re.match(r"(?:的)?是", (text or "")[match.end():])
+        ):
+            continue
         candidate = _clean_attribution_candidate(match.group("speaker"))
         if candidate:
             candidates.append({"speaker": candidate, "verb": match.group("verb")})
     # Handle quote-first forms: 「...」某人说道。
     for tail in re.findall(r"」([^。！？；;]{0,30})", text or ""):
         for match in ATTRIBUTION_VERB_RE.finditer(tail):
+            candidate = _clean_attribution_candidate(match.group("speaker"))
+            if candidate:
+                candidates.append({"speaker": candidate, "verb": match.group("verb")})
+    for pattern in (INVERTED_CONTACT_ATTRIBUTION_RE, SUBJECT_CONTACT_ATTRIBUTION_RE):
+        for match in pattern.finditer(text or ""):
             candidate = _clean_attribution_candidate(match.group("speaker"))
             if candidate:
                 candidates.append({"speaker": candidate, "verb": match.group("verb")})
@@ -2314,16 +2438,17 @@ Tool: read_novel_lines(start, count)
 EVIDENCE HIERARCHY (Priority)
 ========================================
 
-1. [HIGHEST] Speech verbs naming the speaker in the IMMEDIATE context
-   Lines like: "XX说", "XX喊道", "XX开口", "XX回答", "XX问", "XX叹息", "XX回答"
-   If you find one within 5 lines of the dialogue → USE IT. You are done.
+1. [HIGHEST] A speech attribution grammatically bound to the EXACT target quote
+   - A pre-quote attribution ending in a colon normally introduces the following quote.
+   - A non-colon attribution immediately after a quote normally belongs to that preceding quote.
+   - An attribution between two quotes is not automatically available to both quotes.
+   - When one raw line contains multiple quotes, identify which quote occurrence the attribution governs.
+   Mere distance (for example, a speech verb within five lines) is never enough by itself.
 
-2. [HIGH] Narrative-position evidence
-   The paragraph/sentence structure around the dialogue. E.g.:
-   - "XX做了某事，然后说：" → XX is the speaker
-   - "XX说道：" → XX is the speaker
-   - "XX回答那人说：" → XX is the speaker
-   The line IMMEDIATELY before a 「dialogue」 is the most important.
+2. [HIGH] Quote-scope and dialogue-boundary evidence
+   Build a small ledger of every nearby quote in chronological order. Mark explicit anchors, narrative breaks,
+   same-speaker continuations, and only then locate the target occurrence. The line immediately before the target
+   matters only after checking whether it closes the previous quote or introduces the target.
 
 3. [LOW] Alternating dialogue pattern
    Useful only as a tie-breaker when two adjacent character speeches have no narrative break and no explicit attribution.
@@ -2336,16 +2461,18 @@ EVIDENCE HIERARCHY (Priority)
 CRITICAL RULES - Do NOT Violate
 ========================================
 
-RULE A: Speech verbs over everything
-- If you find "说/喊道/问/开口/回答/继续说/低语" naming a character within 5 lines, THAT is the speaker
-- Ignore any narrative that describes appearance/thoughts/actions of a different character
-- Narrative describing how someone looks/feels does NOT prove they are speaking
+RULE A: Exact quote binding over everything
+- Speech verbs are decisive only when their grammar and punctuation bind the exact target quote occurrence.
+- A post-quote non-colon attribution is consumed by the quote before it; do not move it onto the next quote.
+- A pre-quote attribution ending in a colon normally opens the following quote.
+- If several quotes or speech verbs occur nearby, map all of them before selecting the target speaker.
+- Narrative describing appearance, thoughts, gaze, or ordinary actions does NOT prove that person is speaking.
 
-RULE B: Read locally FIRST
-- Start reading from 5-10 lines BEFORE the dialogue line
-- The evidence you need is almost always within 5 lines
-- Only expand search range if you find NO speech verb in the immediate context
-- Do NOT search 40+ lines away unless local search found nothing
+RULE B: Read the complete local dialogue block FIRST
+- Start at least 10-15 lines before the target and continue at least 10-15 lines after it.
+- List the nearby quotes in order and identify the nearest reliable anchor on each side.
+- Do not stop merely because you found a speech verb; first prove which quote it binds.
+- If the local block begins or ends mid-conversation, expand to the earlier or later anchor before deciding.
 
 RULE C: Distinguish "speaker" from "mentioned person"
 - "被XX的人物" = mentioned, not speaking
@@ -2376,7 +2503,7 @@ RULE G: Alternating dialogue - specific rules
 - Alternation is WEAK evidence. It is useful only when there is no narrative break and no explicit attribution.
 - If a narrative paragraph appears between two dialogues → the pattern RESETS.
 - One character CAN speak multiple consecutive lines. Do not force alternation.
-- RULE: If immediate narrative contains a speech verb → that overrides ALL alternating patterns.
+- RULE: If immediate narrative contains a speech verb grammatically bound to TARGET → that overrides ALL alternating patterns.
 - Use [Local dialogue structure] as a map: it tells you whether the previous dialogue is separated by narrative.
 - Use [Recent speaker order] only after checking local text; it is a clue, not proof, and may contain earlier mistakes.
 
@@ -2389,24 +2516,30 @@ RULE H: Report evidence strength honestly
 WORKFLOW
 ========================================
 
-1. CALL read_novel_lines for lines around the target (±15 lines)
-   Read lines 10-15 BEFORE the dialogue first. Look for speech verbs naming the speaker.
+1. CALL read_novel_lines for a block around the target (normally ±15 lines).
 
-2. If you find a speech verb within 5 lines → CONFIRM and output answer immediately
-   Do NOT search further. You have your answer.
+2. Build a quote-scope ledger before answering:
+   a. enumerate every nearby quote occurrence in chronological order;
+   b. bind pre-quote colon attributions and post-quote non-colon attributions to their exact quote;
+   c. mark narrative breaks and confirmed same-speaker continuations;
+   d. locate the target by both line number and quote text/occurrence.
 
-3. If no speech verb found → expand search range (±30 lines)
-   Check for:
-   a. Who spoke last (from auxiliary info and text)
-   b. Is there an alternating pattern?
-   c. Did the scene change?
+3. If the target has no direct binding, reconstruct from BOTH sides:
+   a. read forward from the nearest reliable anchor before it;
+   b. read backward from the nearest reliable anchor after it;
+   c. compare same-speaker continuation against a real response/switch;
+   d. do not invent a switch solely to preserve alternation.
+   Expand the raw range when either side lacks an anchor.
 
-4. If using a descriptor/role instead of a name → verify whether it has a named identity.
+4. Treat auxiliary labels, memory, role expectations, and character style as fallible hypotheses. They may suggest
+   what to verify in raw text, but they cannot establish the answer or overrule quote scope.
+
+5. If using a descriptor/role instead of a name → verify whether it has a named identity.
    Search nearby context, character state, evidence summaries, and forward/backward text for introductions or alias links.
    Look for patterns such as "我叫XX", "我是XX", "名字是XX", "吾乃XX", or narration that says the descriptor is named XX.
    If found → use the revealed name. If not found → keep the stable descriptor.
 
-5. Output with <answer>, <quote_type>, <evidence_basis>, <confidence>, <reason>, and <summary>. Optionally add <discovery> if you find new character info.
+6. Output with <answer>, <quote_type>, <evidence_basis>, <confidence>, <reason>, and <summary>. Optionally add <discovery> if you find new character info.
 
 ========================================
 OUTPUT FORMAT
@@ -2467,8 +2600,8 @@ Short-term memory labels and character state are reference only.
 You can use TWO tools:
 1. read_novel_lines(start, count) — read specific lines
 2. search_novel(keyword, context_lines=2) — search by keyword/name
-Start reading 5-10 lines BEFORE the target line. Look for speech verbs naming the speaker.
-If found, you are done. If not, expand gradually or use search_novel.
+Read the complete local quote block. Prove which exact quote occurrence each nearby attribution binds before answering.
+If an exact target binding is proved, you may answer. Otherwise expand in both directions or use search_novel.
 If you think an auxiliary label is wrong, say so in <reason>.
 ========================================="""
 
@@ -4165,6 +4298,20 @@ class Boss:
             )
             lines.append(f"  Narrative break before target: {examples}")
             lines.append("  A narrative break resets simple alternation unless it explicitly attributes speech.")
+            boundary_text = " ".join(text.strip() for _, text in structure["narrative_between"])
+            if SPEECH_ATTRIBUTION_RE.search(boundary_text):
+                if re.search(r"[:：]\s*$", boundary_text):
+                    lines.append(
+                        "  [Quote-scope constraint] The intervening speech narration ends with a colon and may "
+                        "introduce TARGET; verify the exact subject and scope."
+                    )
+                else:
+                    lines.append(
+                        "  [Quote-scope constraint] The intervening speech narration follows the previous quote "
+                        "and does not end with a colon. By default it closes or attributes the PREVIOUS quote, not "
+                        "TARGET. Do not call it explicit evidence for TARGET unless the wording independently proves "
+                        "that it announces a new utterance."
+                    )
         lines.append(
             "  Nearby attribution words: "
             + ("present" if structure.get("has_nearby_attribution_word") else "not obvious")

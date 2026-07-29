@@ -22,9 +22,11 @@ from scene_sequence import (
 
 
 _SPEECH_VERB_PATTERN = (
-    r"(?:说(?:道|着|完|了)?|问(?:道)?|回答|答道|喊(?:道)?|叫(?:道)?|开口|"
-    r"低语|嘀咕|喃喃|叹(?:道)?|笑(?:道)?|补充|表示)"
+    r"(?:说(?!不(?:出|上|下|成|定|清|明|来))(?:道|着|完|了)?|问(?:道)?|回答|答道|喊(?:道)?|叫(?:道)?|开口|"
+    r"低语|嘀咕|喃喃|叹(?:道)?|笑(?:道)?|补充|表示|"
+    r"搭腔|搭话|接话|插话|回应|应声)"
 )
+_DIALOGUE_CONTACT_VERBS = {"搭腔", "搭话", "接话", "插话", "回应", "应声"}
 _NONPERSON_CONTAINER_RE = re.compile(
     r"(?:没有说出口|没说出口|未说出口|并未说出口|不曾说出口|"
     r"没有开口|并未开口|省略(?:掉)?(?:了)?(?:这|那)?句[^。！？]{0,16}话(?:语)?|"
@@ -279,6 +281,8 @@ class SceneSequenceAudit:
         *,
         max_scene_turns: int = 6,
         max_scene_raw_span: int = 180,
+        scene_context_padding: int = 80,
+        allow_model_consensus_override: bool = False,
     ):
         self.novel_lines = novel_lines
         self.dialogue_list = dialogue_list
@@ -288,7 +292,9 @@ class SceneSequenceAudit:
             dialogue_list,
             max_turns=max_scene_turns,
             max_raw_span=max_scene_raw_span,
+            raw_padding=scene_context_padding,
         )
+        self.allow_model_consensus_override = bool(allow_model_consensus_override)
         self.scene_cache: dict[str, dict[str, Any]] = {}
         self.model_call_count = 0
 
@@ -339,6 +345,14 @@ class SceneSequenceAudit:
             max_raw_chars=24000,
         )
         target_packet_text += "\n\n" + self._format_boundary_constraints(packet, dialogue_index)
+        baseline_scope_audit = self._baseline_scope_conflict(
+            baseline,
+            baseline_evidence,
+            baseline_reason,
+            packet,
+            dialogue_index,
+            local_evidence,
+        )
 
         investigations = []
         investigator_specs = [
@@ -403,6 +417,35 @@ class SceneSequenceAudit:
             total_pec += pec
             total_ec += ec
 
+        baseline_hypothesis = self.runtime.validate_speaker(baseline) or baseline or "?"
+        falsifier_instruction = (
+            f"The provisional target-speaker hypothesis is {baseline_hypothesis}. This label is fallible and is "
+            "shown only so you can search for a missing candidate; it carries no authority. Act as a baseline "
+            "falsifier and candidate generator. Reconstruct the previous, target, and next turns twice: first under "
+            "the provisional hypothesis, then under the strongest different source speaker actually present in raw "
+            "text. Pay special attention to a question followed by an answer, consecutive quotes split without "
+            "narration, a listener action that merely prompts a reply, and non-colon narration after the previous "
+            "quote that may already be consumed by that quote. Actively expand context when the local packet begins "
+            "mid-exchange. Submit the strongest alternative when it survives raw-text contradiction; otherwise "
+            "submit the provisional speaker. Never invent a character and never decide from style, topic, occupation, "
+            "species, or mechanical alternation. Your report is candidate evidence only and cannot directly override "
+            "the final label."
+        )
+        report, pec, ec = self._run_investigator(
+            "TargetBaselineFalsifier",
+            falsifier_instruction,
+            target_packet_text,
+            [],
+            neutral_sequences,
+            packet,
+            round_log,
+        )
+        report = dict(report)
+        report["agent"] = "TargetBaselineFalsifier"
+        investigations.append(report)
+        total_pec += pec
+        total_ec += ec
+
         verdict, pec, ec = self._run_verdict(
             target_packet_text,
             neutral_cases,
@@ -414,6 +457,56 @@ class SceneSequenceAudit:
         total_pec += pec
         total_ec += ec
 
+        if (
+            baseline_scope_audit.get("conflict")
+            and _DIALOGUE_CONTACT_VERBS.intersection(
+                baseline_scope_audit.get("consumed_verbs") or []
+            )
+        ):
+            consumed_lines = ", ".join(
+                f"L{line}" for line in baseline_scope_audit.get("consumed_lines") or []
+            )
+            baseline_clean = self.runtime.validate_speaker(baseline) or baseline or "?"
+            contact_specs = [
+                (
+                    "TargetContactScopeRepairForward",
+                    "Reconstruct forward from the preceding quote through TARGET and the following quote. Track who "
+                    "holds the conversational floor and require raw evidence for every switch.",
+                ),
+                (
+                    "TargetContactScopeRepairReverse",
+                    "Reconstruct backward from the first reliable attribution or action after TARGET. Test whether "
+                    "TARGET is a reply to the consumed contact utterance or an independently supported continuation.",
+                ),
+                (
+                    "TargetContactScopeRepairDialogueAct",
+                    "Map address, greeting, question-answer, thanks-reciprocation, correction, and elaboration roles "
+                    "across the previous, target, and next turns without using personality or occupation.",
+                ),
+            ]
+            for agent_name, perspective in contact_specs:
+                instruction = (
+                    f"A deterministic quote parser has established that {consumed_lines} contains a non-colon "
+                    "contact-speech attribution consumed by the PRECEDING quote. It cannot be used as attribution "
+                    f"for TARGET. The provisional label {baseline_clean} relied on that consumed line and is not an "
+                    "authority. The same person may still continue, but only independent target evidence can prove "
+                    f"that. {perspective} Submit unresolved when neither hypothesis is grounded."
+                )
+                report, repair_pec, repair_ec = self._run_investigator(
+                    agent_name,
+                    instruction,
+                    target_packet_text,
+                    [],
+                    [],
+                    packet,
+                    round_log,
+                )
+                report = dict(report)
+                report["agent"] = agent_name
+                investigations.append(report)
+                total_pec += repair_pec
+                total_ec += repair_ec
+
         contrastive_boundary, pec, ec = self._run_contrastive_boundary(
             baseline,
             scene_cards,
@@ -423,6 +516,11 @@ class SceneSequenceAudit:
             dialogue_index,
             target_packet_text,
             round_log,
+            neighbor_candidates=self._neighboring_scene_candidates(
+                scene_solution,
+                dialogue_index,
+                baseline,
+            ),
         )
         total_pec += pec
         total_ec += ec
@@ -437,6 +535,7 @@ class SceneSequenceAudit:
             dialogue_index,
             local_evidence,
             contrastive_boundary,
+            baseline_reason=baseline_reason,
         )
         speaker = decision["speaker"]
         summary = f"{speaker} | {dialogue[:120]}"
@@ -1016,12 +1115,14 @@ class SceneSequenceAudit:
         dialogue_index: int,
         target_packet_text: str,
         round_log: dict[str, Any],
+        neighbor_candidates: list[str] | None = None,
     ) -> tuple[dict[str, Any], int, int]:
         candidates = self._contrastive_candidate_pair(
             baseline,
             scene_cards,
             investigations,
             verdict,
+            neighbor_candidates,
         )
         if len(candidates) != 2:
             return {
@@ -1385,12 +1486,201 @@ class SceneSequenceAudit:
         )
         return "\n".join(notes)
 
+    @staticmethod
+    def _contact_verbs_for_speaker(text: str, speaker: str) -> list[str]:
+        if not text or not speaker:
+            return []
+        escaped = re.escape(speaker)
+        contact_pattern = "|".join(sorted(_DIALOGUE_CONTACT_VERBS, key=len, reverse=True))
+        found = []
+        subject_patterns = (
+            rf"(?<![向对朝跟]){escaped}[^。！？；]{{0,80}}?(?P<verb>{contact_pattern})(?!的是)",
+            rf"(?P<verb>{contact_pattern})(?:的)?是[^。！？；]{{0,12}}?{escaped}(?:[，。！？；]|$)",
+        )
+        for pattern in subject_patterns:
+            for match in re.finditer(pattern, text):
+                verb = match.group("verb")
+                if verb not in found:
+                    found.append(verb)
+        return found
+
+    def _baseline_scope_conflict(
+        self,
+        baseline: str,
+        baseline_evidence: dict[str, Any],
+        baseline_reason: str,
+        packet: dict[str, Any],
+        dialogue_index: int,
+        local_evidence: dict[str, Any],
+    ) -> dict[str, Any]:
+        turns = packet.get("turns") or []
+        target_offset = next(
+            (index for index, turn in enumerate(turns) if turn.get("dialogue_index") == dialogue_index),
+            -1,
+        )
+        audit = {
+            "conflict": False,
+            "consumed_lines": [],
+            "consumed_speakers": [],
+            "consumed_verbs": [],
+            "reason": "no consumed previous-quote attribution conflicts with the baseline evidence",
+        }
+        if target_offset <= 0:
+            return audit
+
+        previous = turns[target_offset - 1]
+        target = turns[target_offset]
+        between = [
+            item for item in packet.get("raw_lines") or []
+            if previous["line"] < item["line"] < target["line"]
+        ]
+        if not between:
+            return audit
+        first = between[0]
+        first_text = str(first.get("text") or "").strip()
+        if not re.search(_SPEECH_VERB_PATTERN, first_text) or re.search(r"[:：]\s*$", first_text):
+            return audit
+
+        consumed_line = int(first["line"])
+        baseline_clean = self.runtime.validate_speaker(baseline) or baseline
+        consumed_speakers = []
+        matched_baseline_verbs = []
+        for item in (local_evidence or {}).get("attribution_candidates") or []:
+            try:
+                item_line = int(item.get("line"))
+            except (TypeError, ValueError):
+                continue
+            if item_line != consumed_line:
+                continue
+            speaker = self.runtime.validate_speaker(item.get("speaker", "")) or ""
+            if speaker and not any(self.runtime.same_speaker(speaker, value) for value in consumed_speakers):
+                consumed_speakers.append(speaker)
+            verb = str(item.get("verb") or "").strip()
+            if (
+                speaker
+                and self.runtime.same_speaker(baseline_clean, speaker)
+                and verb
+                and verb not in matched_baseline_verbs
+            ):
+                matched_baseline_verbs.append(verb)
+
+        contact_verbs = self._contact_verbs_for_speaker(first_text, baseline_clean)
+        if contact_verbs and not any(
+            self.runtime.same_speaker(baseline_clean, speaker) for speaker in consumed_speakers
+        ):
+            consumed_speakers.append(baseline_clean)
+        for verb in contact_verbs:
+            if verb not in matched_baseline_verbs:
+                matched_baseline_verbs.append(verb)
+
+        audit["consumed_lines"] = [consumed_line]
+        audit["consumed_speakers"] = consumed_speakers
+        audit["consumed_verbs"] = matched_baseline_verbs
+        basis = str(baseline_evidence.get("evidence_basis") or "unknown")
+        reason_cites_line = bool(re.search(rf"(?<!\d)L?{consumed_line}(?!\d)", baseline_reason or ""))
+        baseline_matches_consumed = any(
+            self.runtime.same_speaker(baseline_clean, speaker) for speaker in consumed_speakers
+        )
+        if (
+            baseline_matches_consumed
+            and reason_cites_line
+            and basis in {"explicit_attribution", "speaker_action", "sequence_constraint"}
+        ):
+            audit["conflict"] = True
+            audit["reason"] = (
+                f"baseline cites L{consumed_line} for {basis}, but that non-colon attribution is consumed by "
+                "the preceding quote"
+            )
+        return audit
+
+    def _scope_repair_consensus(
+        self,
+        baseline: str,
+        scene_cards: list[dict[str, Any]],
+        investigations: list[dict[str, Any]],
+        target_line: int,
+    ) -> dict[str, Any]:
+        groups: list[dict[str, Any]] = []
+        baseline_clean = self.runtime.validate_speaker(baseline) or baseline
+
+        def add(card: dict[str, Any], source_kind: str, source_name: str) -> None:
+            if not card.get("valid"):
+                return
+            if source_kind == "investigation" and card.get("status") != "resolved":
+                return
+            if card.get("confidence") not in {"high", "medium"}:
+                return
+            speaker = self.runtime.validate_speaker(card.get("speaker", "")) or ""
+            if (
+                not speaker
+                or not self.runtime.is_valid_speaker(speaker)
+                or self.runtime.same_speaker(speaker, baseline_clean)
+            ):
+                return
+            citations = self._int_list(card.get("citations"), None)
+            if not citations or not any(abs(line - target_line) <= 8 for line in citations):
+                return
+            group = next(
+                (item for item in groups if self.runtime.same_speaker(item["speaker"], speaker)),
+                None,
+            )
+            if group is None:
+                group = {
+                    "speaker": speaker,
+                    "sources": [],
+                    "source_kinds": set(),
+                    "citations": set(),
+                }
+                groups.append(group)
+            if source_name not in group["sources"]:
+                group["sources"].append(source_name)
+            group["source_kinds"].add(source_kind)
+            group["citations"].update(citations)
+
+        for card in scene_cards:
+            add(card, "scene", str(card.get("agent") or "scene-mapper"))
+        for card in investigations:
+            add(card, "investigation", str(card.get("agent") or "investigator"))
+
+        qualified = [
+            group for group in groups
+            if len(group["sources"]) >= 3
+            and (
+                {"scene", "investigation"}.issubset(group["source_kinds"])
+                or sum(
+                    str(source).startswith("TargetContactScopeRepair")
+                    for source in group["sources"]
+                ) >= 2
+            )
+        ]
+        qualified.sort(key=lambda item: len(item["sources"]), reverse=True)
+        if not qualified:
+            return {"valid": False, "speaker": "", "support": 0, "sources": [], "citations": []}
+        winner = qualified[0]
+        if len(qualified) > 1 and len(qualified[0]["sources"]) == len(qualified[1]["sources"]):
+            return {"valid": False, "speaker": "", "support": 0, "sources": [], "citations": []}
+        return {
+            "valid": True,
+            "speaker": winner["speaker"],
+            "support": len(winner["sources"]),
+            "sources": winner["sources"],
+            "citations": sorted(winner["citations"]),
+            "scene_support": sum(source in {card.get("agent") for card in scene_cards} for source in winner["sources"]),
+            "investigation_support": sum(
+                source in {card.get("agent") for card in investigations} for source in winner["sources"]
+            ),
+            "contact_repair_support": sum(
+                str(source).startswith("TargetContactScopeRepair") for source in winner["sources"]
+            ),
+        }
+
     def _contrastive_candidate_pair(
         self,
         baseline: str,
         scene_cards: list[dict[str, Any]],
         investigations: list[dict[str, Any]],
         verdict: dict[str, Any],
+        neighbor_candidates: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         groups: list[dict[str, Any]] = []
 
@@ -1422,6 +1712,8 @@ class SceneSequenceAudit:
         for report in investigations:
             if report.get("valid") and report.get("status") == "resolved":
                 add(report.get("speaker", ""), f"investigation:{report.get('agent') or 'agent'}", 2)
+        for speaker in neighbor_candidates or []:
+            add(speaker, "neighboring-scene-turn", 1)
 
         if len(groups) < 2:
             return groups
@@ -1438,6 +1730,53 @@ class SceneSequenceAudit:
             )
             return [baseline_group, alternative]
         return groups[:2]
+
+    def _neighboring_scene_candidates(
+        self,
+        scene_solution: dict[str, Any],
+        dialogue_index: int,
+        baseline: str,
+    ) -> list[str]:
+        packet = scene_solution.get("packet") or {}
+        turn_by_id = {
+            str(turn.get("turn_id") or turn.get("id")): turn for turn in packet.get("turns") or []
+        }
+        groups: list[dict[str, Any]] = []
+        baseline_clean = self.runtime.validate_speaker(baseline) or baseline
+
+        for scene_map in scene_solution.get("maps") or []:
+            if not scene_map.get("valid"):
+                continue
+            for turn_id, assignment in (scene_map.get("assignments") or {}).items():
+                turn = turn_by_id.get(str(turn_id))
+                if not turn:
+                    continue
+                distance = abs(int(turn.get("dialogue_index", -999999)) - int(dialogue_index))
+                if distance == 0 or distance > 3:
+                    continue
+                speaker = self.runtime.validate_speaker(assignment.get("speaker", "")) or ""
+                if (
+                    not speaker
+                    or not self.runtime.is_valid_speaker(speaker)
+                    or speaker == self.runtime.non_person_label
+                    or self.runtime.same_speaker(speaker, baseline_clean)
+                ):
+                    continue
+                group = next(
+                    (item for item in groups if self.runtime.same_speaker(item["speaker"], speaker)),
+                    None,
+                )
+                if group is None:
+                    group = {"speaker": speaker, "score": 0, "sources": set()}
+                    groups.append(group)
+                group["score"] += 4 - distance
+                group["sources"].add(str(scene_map.get("agent") or "scene-mapper"))
+
+        groups.sort(
+            key=lambda item: (item["score"], len(item["sources"])),
+            reverse=True,
+        )
+        return [item["speaker"] for item in groups[:3]]
 
     @staticmethod
     def _normalize_boundary_brief(
@@ -1541,6 +1880,7 @@ class SceneSequenceAudit:
         dialogue_index: int,
         local_evidence: dict[str, Any],
         contrastive_boundary: dict[str, Any] | None = None,
+        baseline_reason: str = "",
     ) -> dict[str, Any]:
         baseline_clean = self.runtime.validate_speaker(baseline) or baseline
         proposed = self.runtime.validate_speaker(verdict.get("speaker", "")) or ""
@@ -1593,6 +1933,15 @@ class SceneSequenceAudit:
             "confidence": baseline_evidence.get("confidence", "low"),
             "citations": [],
         }
+        scope_audit = self._baseline_scope_conflict(
+            baseline_clean,
+            baseline_evidence,
+            baseline_reason,
+            packet,
+            dialogue_index,
+            local_evidence,
+        )
+        decision["baseline_scope_audit"] = scope_audit
 
         person_candidate, person_scene_support = self._scene_person_consensus(scene_cards)
         partial_speech = self._has_partial_spoken_quote_container(target_line, packet)
@@ -1609,17 +1958,21 @@ class SceneSequenceAudit:
             person_candidate
             and self._has_conveyed_quote_binding(person_candidate, target_line, packet)
         )
-        if person_scene_support >= 2 and (partial_speech_binding or person_vocalization or conveyed_quote):
+        legacy_restoration = bool(
+            self.allow_model_consensus_override
+            and (partial_speech_binding or conveyed_quote)
+        )
+        if person_scene_support >= 2 and (person_vocalization or legacy_restoration):
             changed = not self.runtime.same_speaker(baseline_clean, person_candidate)
-            if partial_speech_binding:
-                source = "partial-speech-person-restoration"
-                gate = "started-speech-plus-scene-consensus"
-                restored_quote_type = "direct_speech"
-                restored_basis = "explicit_attribution"
-            elif person_vocalization:
+            if person_vocalization:
                 source = "person-vocalization-restoration"
                 gate = "bound-person-vocalization-plus-scene-consensus"
                 restored_quote_type = "sound_or_text"
+                restored_basis = "explicit_attribution"
+            elif partial_speech_binding:
+                source = "partial-speech-person-restoration"
+                gate = "started-speech-plus-scene-consensus"
+                restored_quote_type = "direct_speech"
                 restored_basis = "explicit_attribution"
             else:
                 source = "conveyed-quote-person-restoration"
@@ -1669,24 +2022,82 @@ class SceneSequenceAudit:
             and high
             and nearby_citation
         )
-        if resolved_nonperson and (
-            (deterministic_nonperson and matching_nonperson_investigations)
-            or (len(matching_nonperson_investigations) >= 2 and scene_nonperson_support >= 2)
-        ):
+        if resolved_nonperson and deterministic_nonperson and matching_nonperson_investigations:
             changed = not self.runtime.same_speaker(baseline_clean, self.runtime.non_person_label)
             decision.update(
                 speaker=self.runtime.non_person_label,
                 baseline_changed=changed,
-                selection_source=(
-                    "nonperson-container-override" if deterministic_nonperson
-                    else "corroborated-nonperson-override"
-                ),
-                evidence_gate=(
-                    "deterministic-unspoken-container" if deterministic_nonperson
-                    else "two-investigations-plus-scene-quote-type"
-                ),
+                selection_source="nonperson-container-override",
+                evidence_gate="deterministic-unspoken-container",
                 confirmed_anchor=True,
             )
+            return self._apply_verdict_fields(decision, verdict)
+
+        if not self.allow_model_consensus_override:
+            if not self.runtime.is_valid_speaker(baseline_clean):
+                if proposed and self.runtime.is_valid_speaker(proposed) and verdict.get("status") == "resolved":
+                    decision.update(
+                        speaker=proposed,
+                        baseline_changed=True,
+                        selection_source="invalid-baseline-scene-replacement",
+                        evidence_gate="valid-scene-verdict",
+                        confirmed_anchor=strong_anchor,
+                    )
+                else:
+                    decision.update(
+                        speaker="?",
+                        selection_source="scene-unresolved-invalid-baseline",
+                    )
+                return self._apply_verdict_fields(decision, verdict)
+
+            if scope_audit["conflict"]:
+                repair = self._scope_repair_consensus(
+                    baseline_clean,
+                    scene_cards,
+                    investigations,
+                    target_line,
+                )
+                decision["scope_repair_consensus"] = repair
+                contact_scope = bool(
+                    _DIALOGUE_CONTACT_VERBS.intersection(scope_audit.get("consumed_verbs") or [])
+                )
+                verdict_matches_repair = bool(
+                    repair.get("valid")
+                    and proposed
+                    and self.runtime.same_speaker(proposed, repair.get("speaker", ""))
+                    and verdict.get("status") == "resolved"
+                    and verdict.get("confidence") in {"high", "medium"}
+                )
+                if (
+                    contact_scope
+                    and verdict_matches_repair
+                    and repair.get("support", 0) >= 3
+                    and repair.get("contact_repair_support", 0) >= 2
+                    and repair.get("speaker") != self.runtime.non_person_label
+                ):
+                    decision.update(
+                        speaker=repair["speaker"],
+                        baseline_changed=True,
+                        selection_source="contact-scope-repair-override",
+                        evidence_gate="consumed-contact-attribution-plus-cross-role-repair",
+                        confirmed_anchor=False,
+                        citations=repair["citations"],
+                    )
+                    return self._apply_verdict_fields(decision, verdict)
+
+            if proposed and self.runtime.same_speaker(proposed, baseline_clean):
+                decision["evidence_gate"] = "model-verdict-agrees-baseline-unconfirmed"
+                decision["confirmed_anchor"] = False
+            elif proposed:
+                decision["rejected_scene_proposal"] = proposed
+                decision["rejected_reason"] = (
+                    "model consensus is retained as audit evidence but cannot override a valid baseline"
+                )
+            boundary = contrastive_boundary or {}
+            boundary_speaker = self.runtime.validate_speaker(boundary.get("speaker", "")) or ""
+            if boundary_speaker and not self.runtime.same_speaker(boundary_speaker, baseline_clean):
+                decision["rejected_boundary_proposal"] = boundary_speaker
+            decision["model_consensus_override_enabled"] = False
             return self._apply_verdict_fields(decision, verdict)
 
         boundary = contrastive_boundary or {}
