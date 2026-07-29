@@ -55,6 +55,12 @@ class SceneSelectionTests(unittest.TestCase):
             novel_lines,
             [(10, "第一句"), (12, "第二句")],
             runtime,
+            allow_model_consensus_override=True,
+        )
+        self.conservative_audit = SceneSequenceAudit(
+            novel_lines,
+            [(10, "第一句"), (12, "第二句")],
+            runtime,
         )
         segment = self.audit.segments[0]
         from scene_sequence import build_scene_packet
@@ -155,6 +161,276 @@ class SceneSelectionTests(unittest.TestCase):
             contrastive,
         )
 
+    def select_conservative(self, baseline, scene_cards, investigations, verdict, contrastive=None):
+        return self.conservative_audit._select_decision(
+            baseline,
+            {"quote_type": "direct_speech", "evidence_basis": "inference", "confidence": "low"},
+            scene_cards,
+            investigations,
+            verdict,
+            self.packet,
+            0,
+            {},
+            contrastive,
+        )
+
+    def test_default_policy_retains_valid_baseline_against_model_consensus(self):
+        scene_cards = [self.scene_card("角色乙") for _ in range(5)]
+        investigations = [self.investigation("角色乙") for _ in range(5)]
+
+        decision = self.select_conservative(
+            "角色甲",
+            scene_cards,
+            investigations,
+            self.verdict("角色乙", level="strong", basis="sequence_constraint"),
+            self.contrastive("角色乙"),
+        )
+
+        self.assertEqual("角色甲", decision["speaker"])
+        self.assertFalse(decision["baseline_changed"])
+        self.assertFalse(decision["model_consensus_override_enabled"])
+        self.assertEqual("角色乙", decision["rejected_scene_proposal"])
+        self.assertEqual("角色乙", decision["rejected_boundary_proposal"])
+
+    def test_default_policy_can_replace_an_invalid_baseline(self):
+        decision = self.select_conservative(
+            "?",
+            [],
+            [],
+            self.verdict("角色乙", level="strong", basis="sequence_constraint"),
+        )
+
+        self.assertEqual("角色乙", decision["speaker"])
+        self.assertTrue(decision["baseline_changed"])
+        self.assertEqual("invalid-baseline-scene-replacement", decision["selection_source"])
+
+    def test_default_policy_does_not_confirm_model_only_baseline_agreement(self):
+        decision = self.select_conservative(
+            "角色甲",
+            [self.scene_card("角色甲") for _ in range(5)],
+            [self.investigation("角色甲") for _ in range(5)],
+            self.verdict("角色甲", level="strong", basis="sequence_constraint"),
+        )
+
+        self.assertEqual("角色甲", decision["speaker"])
+        self.assertFalse(decision["confirmed_anchor"])
+        self.assertEqual(
+            "model-verdict-agrees-baseline-unconfirmed",
+            decision["evidence_gate"],
+        )
+
+    def test_dialogue_contact_verb_creates_previous_quote_scope_constraint(self):
+        packet = {
+            "turns": [
+                {"turn_id": "D0", "dialogue_index": 0, "line": 10},
+                {"turn_id": "D1", "dialogue_index": 1, "line": 12},
+            ],
+            "raw_lines": [
+                {"line": 10, "text": "第一句"},
+                {"line": 11, "text": "角色甲向角色乙搭腔。"},
+                {"line": 12, "text": "第二句"},
+            ],
+        }
+
+        constraints = self.conservative_audit._format_boundary_constraints(packet, 1)
+
+        self.assertIn("binds that preceding quote, not TARGET", constraints)
+
+    def test_inability_to_speak_does_not_create_scope_constraint(self):
+        packet = {
+            "turns": [
+                {"turn_id": "D0", "dialogue_index": 0, "line": 10},
+                {"turn_id": "D1", "dialogue_index": 1, "line": 12},
+            ],
+            "raw_lines": [
+                {"line": 10, "text": "第一句"},
+                {"line": 11, "text": "角色甲说不出话来。"},
+                {"line": 12, "text": "第二句"},
+            ],
+        }
+
+        constraints = self.conservative_audit._format_boundary_constraints(packet, 1)
+
+        self.assertIn("No deterministic adjacent speech-attribution scope", constraints)
+
+    def test_contact_subject_detection_does_not_treat_addressee_as_speaker(self):
+        self.assertEqual(
+            [],
+            self.conservative_audit._contact_verbs_for_speaker("向角色乙搭腔的是角色甲。", "角色乙"),
+        )
+        self.assertEqual(
+            ["搭腔"],
+            self.conservative_audit._contact_verbs_for_speaker("向角色乙搭腔的是角色甲。", "角色甲"),
+        )
+
+    def test_contact_subject_detection_handles_long_subject_action_clause(self):
+        verbs = self.conservative_audit._contact_verbs_for_speaker(
+            "角色甲先向旁人招呼几句后，便向角色乙搭腔。",
+            "角色甲",
+        )
+
+        self.assertEqual(["搭腔"], verbs)
+
+    def test_scope_conflict_logs_cross_role_consensus_without_overriding(self):
+        packet = {
+            "turns": [
+                {"turn_id": "D0", "dialogue_index": 0, "line": 10},
+                {"turn_id": "D1", "dialogue_index": 1, "line": 12},
+            ],
+            "raw_lines": [
+                {"line": 10, "text": "第一句"},
+                {"line": 11, "text": "角色甲向角色乙搭腔。"},
+                {"line": 12, "text": "第二句"},
+            ],
+        }
+        scene_cards = [self.scene_card("角色乙") for _ in range(2)]
+        scene_cards[0]["agent"] = "SceneA"
+        scene_cards[1]["agent"] = "SceneB"
+        for card in scene_cards:
+            card["citations"] = [12]
+        investigations = [self.investigation("角色乙")]
+        investigations[0]["agent"] = "InvestigatorA"
+        investigations[0]["citations"] = [12]
+
+        decision = self.conservative_audit._select_decision(
+            "角色甲",
+            {"quote_type": "direct_speech", "evidence_basis": "speaker_action", "confidence": "high"},
+            scene_cards,
+            investigations,
+            self.verdict("角色甲", level="strong", basis="sequence_constraint"),
+            packet,
+            1,
+            {
+                "attribution_candidates": [
+                    {"speaker": "角色甲", "verb": "搭腔", "line": 11, "text": "角色甲向角色乙搭腔。"}
+                ]
+            },
+            baseline_reason="L11 shows 角色甲 speaking the target",
+        )
+
+        self.assertEqual("角色甲", decision["speaker"])
+        self.assertFalse(decision["baseline_changed"])
+        self.assertTrue(decision["baseline_scope_audit"]["conflict"])
+        self.assertTrue(decision["scope_repair_consensus"]["valid"])
+        self.assertEqual("角色乙", decision["scope_repair_consensus"]["speaker"])
+
+    def test_contact_scope_conflict_requires_dedicated_repair_agents(self):
+        packet = {
+            "turns": [
+                {"turn_id": "D0", "dialogue_index": 0, "line": 10},
+                {"turn_id": "D1", "dialogue_index": 1, "line": 12},
+            ],
+            "raw_lines": [
+                {"line": 10, "text": "第一句"},
+                {"line": 11, "text": "角色甲向角色乙搭腔。"},
+                {"line": 12, "text": "第二句"},
+            ],
+        }
+        scene_cards = [self.scene_card("角色乙") for _ in range(2)]
+        investigations = [self.investigation("角色乙") for _ in range(2)]
+        for index, card in enumerate(scene_cards):
+            card["agent"] = f"Scene{index}"
+            card["citations"] = [12]
+        for index, card in enumerate(investigations):
+            card["agent"] = f"Investigator{index}"
+            card["citations"] = [12]
+
+        decision = self.conservative_audit._select_decision(
+            "角色甲",
+            {"quote_type": "direct_speech", "evidence_basis": "speaker_action", "confidence": "high"},
+            scene_cards,
+            investigations,
+            self.verdict("角色乙", level="strong", basis="sequence_constraint"),
+            packet,
+            1,
+            {
+                "attribution_candidates": [
+                    {"speaker": "角色甲", "verb": "搭腔", "line": 11, "text": "角色甲向角色乙搭腔。"}
+                ]
+            },
+            baseline_reason="L11 shows 角色甲 speaking the target",
+        )
+
+        self.assertEqual("角色甲", decision["speaker"])
+        self.assertFalse(decision["baseline_changed"])
+
+    def test_contact_scope_conflict_can_use_dedicated_repair_consensus(self):
+        packet = {
+            "turns": [
+                {"turn_id": "D0", "dialogue_index": 0, "line": 10},
+                {"turn_id": "D1", "dialogue_index": 1, "line": 12},
+            ],
+            "raw_lines": [
+                {"line": 10, "text": "第一句"},
+                {"line": 11, "text": "角色甲向角色乙搭腔。"},
+                {"line": 12, "text": "第二句"},
+            ],
+        }
+        investigations = [self.investigation("角色乙") for _ in range(3)]
+        names = [
+            "TargetContactScopeRepairForward",
+            "TargetContactScopeRepairReverse",
+            "TargetOpenWorldInvestigator",
+        ]
+        for card, name in zip(investigations, names):
+            card["agent"] = name
+            card["citations"] = [12]
+
+        decision = self.conservative_audit._select_decision(
+            "角色甲",
+            {"quote_type": "direct_speech", "evidence_basis": "speaker_action", "confidence": "high"},
+            [],
+            investigations,
+            self.verdict("角色乙", level="strong", basis="sequence_constraint"),
+            packet,
+            1,
+            {
+                "attribution_candidates": [
+                    {"speaker": "角色甲", "verb": "搭腔", "line": 11, "text": "角色甲向角色乙搭腔。"}
+                ]
+            },
+            baseline_reason="L11 shows 角色甲 speaking the target",
+        )
+
+        self.assertEqual("角色乙", decision["speaker"])
+        self.assertTrue(decision["baseline_changed"])
+        self.assertEqual("contact-scope-repair-override", decision["selection_source"])
+
+    def test_scope_conflict_without_cross_role_consensus_keeps_baseline(self):
+        packet = {
+            "turns": [
+                {"turn_id": "D0", "dialogue_index": 0, "line": 10},
+                {"turn_id": "D1", "dialogue_index": 1, "line": 12},
+            ],
+            "raw_lines": [
+                {"line": 10, "text": "第一句"},
+                {"line": 11, "text": "角色甲向角色乙搭腔。"},
+                {"line": 12, "text": "第二句"},
+            ],
+        }
+        lone_card = self.scene_card("角色乙")
+        lone_card["agent"] = "SceneA"
+        lone_card["citations"] = [12]
+
+        decision = self.conservative_audit._select_decision(
+            "角色甲",
+            {"quote_type": "direct_speech", "evidence_basis": "speaker_action", "confidence": "high"},
+            [lone_card],
+            [],
+            self.verdict("角色甲", level="strong", basis="sequence_constraint"),
+            packet,
+            1,
+            {
+                "attribution_candidates": [
+                    {"speaker": "角色甲", "verb": "搭腔", "line": 11, "text": "角色甲向角色乙搭腔。"}
+                ]
+            },
+            baseline_reason="L11 shows 角色甲 speaking the target",
+        )
+
+        self.assertEqual("角色甲", decision["speaker"])
+        self.assertFalse(decision["baseline_changed"])
+
     def test_boundary_tools_require_explicit_weakness_and_relations(self):
         brief_required = BOUNDARY_BRIEF_TOOL["function"]["parameters"]["required"]
         jury_required = BOUNDARY_JURY_TOOL["function"]["parameters"]["required"]
@@ -234,6 +510,45 @@ class SceneSelectionTests(unittest.TestCase):
         self.assertEqual("not_run", report["status"])
         self.assertIn("identity canonicalization", report["reason"])
         self.assertEqual((0, 0), (pec, ec))
+
+    def test_neighboring_scene_speaker_can_seed_missing_contrastive_candidate(self):
+        candidates = self.audit._contrastive_candidate_pair(
+            "角色甲",
+            [self.scene_card("角色甲")],
+            [self.investigation("角色甲")],
+            self.verdict("角色甲", level="weak", basis="inference"),
+            ["角色乙"],
+        )
+
+        self.assertEqual(["角色甲", "角色乙"], [item["speaker"] for item in candidates])
+
+    def test_neighboring_scene_candidates_use_packet_id_field(self):
+        scene_solution = {
+            "packet": {
+                "turns": [
+                    {"id": "D0", "dialogue_index": 0, "line": 10},
+                    {"id": "D1", "dialogue_index": 1, "line": 11},
+                ]
+            },
+            "maps": [
+                {
+                    "agent": "SceneA",
+                    "valid": True,
+                    "assignments": {
+                        "D0": {"speaker": "角色乙"},
+                        "D1": {"speaker": "角色甲"},
+                    },
+                }
+            ],
+        }
+
+        candidates = self.conservative_audit._neighboring_scene_candidates(
+            scene_solution,
+            1,
+            "角色甲",
+        )
+
+        self.assertEqual(["角色乙"], candidates)
 
     def test_boundary_jury_cannot_overrule_a_direct_anchor(self):
         decision = self.select(
