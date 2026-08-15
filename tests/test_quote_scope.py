@@ -69,6 +69,59 @@ class QuoteScopeHintTests(unittest.TestCase):
 
         self.assertIn({"speaker": "角色甲", "verb": "搭腔"}, candidates)
 
+    def test_rhetorical_question_is_not_extracted_as_a_speaker(self):
+        candidates = run_label._extract_attribution_candidates("这还用说吗？")
+
+        self.assertEqual([], candidates)
+
+    def test_descriptive_inability_is_not_extracted_as_a_speaker(self):
+        candidates = run_label._extract_attribution_candidates("这种心情无法说清。")
+
+        self.assertEqual([], candidates)
+
+
+class ValidationIdentityTests(unittest.TestCase):
+    def test_verified_role_answer_may_upgrade_to_name(self):
+        identities = {
+            "村民": {"角色甲"},
+            "角色甲": {"角色甲"},
+        }
+
+        matched, reason = run_label._validation_lenient_match(
+            {"村民"}, {"角色甲"}, verified_identities=identities
+        )
+
+        self.assertTrue(matched)
+        self.assertEqual("verified-alias", reason)
+
+    def test_verified_name_answer_cannot_downgrade_to_role(self):
+        identities = {
+            "村民": {"角色甲"},
+            "角色甲": {"角色甲"},
+        }
+
+        matched, _ = run_label._validation_lenient_match(
+            {"角色甲"}, {"村民"}, verified_identities=identities
+        )
+
+        self.assertFalse(matched)
+
+    def test_organization_role_may_use_more_or_less_specific_generic_label(self):
+        matched, reason = run_label._validation_lenient_match(
+            {"某商行的人"}, {"商行的人"}
+        )
+
+        self.assertTrue(matched)
+        self.assertEqual("generic-contained", reason)
+
+    def test_generic_answer_may_upgrade_to_contained_personal_name(self):
+        matched, reason = run_label._validation_lenient_match(
+            {"角色甲商行老板"}, {"角色甲"}
+        )
+
+        self.assertTrue(matched)
+        self.assertEqual("named-upgrade-contained", reason)
+
 
 if __name__ == "__main__":
     unittest.main()

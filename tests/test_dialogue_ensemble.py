@@ -289,10 +289,9 @@ class ApiFallbackTests(unittest.TestCase):
         keys = [f"key-{index}" for index in range(1, 8)]
         models = []
 
-        with (
-            patch.object(run_label, "_load_opencode_provider", return_value=provider),
-            patch.object(run_label, "_load_sensenova_keys", return_value=keys),
-        ):
+        with patch.object(
+            run_label, "_load_opencode_provider", return_value=provider
+        ), patch.object(run_label, "_load_sensenova_keys", return_value=keys):
             run_label._append_sensenova_models(models)
 
         self.assertEqual(
@@ -367,19 +366,20 @@ class ApiFallbackTests(unittest.TestCase):
             model.cooldown_until = 0
 
         try:
-            with (
-                patch.object(
-                    run_label,
-                    "_call_api_fallback_once",
-                    side_effect=[
-                        run_label.ModelCallError("temporary route outage"),
-                        ("OK", 1, 1, []),
-                    ],
-                ) as call_once,
-                patch.object(run_label.time, "sleep", side_effect=finish_cooldown) as sleep,
-                patch.object(run_label, "temp_log_event"),
-            ):
-                result = run_label.call_api_fallback([{"role": "user", "content": "test"}])
+            with patch.object(
+                run_label,
+                "_call_api_fallback_once",
+                side_effect=[
+                    run_label.ModelCallError("temporary route outage"),
+                    ("OK", 1, 1, []),
+                ],
+            ) as call_once:
+                with patch.object(
+                    run_label.time,
+                    "sleep",
+                    side_effect=finish_cooldown,
+                ) as sleep, patch.object(run_label, "temp_log_event"):
+                    result = run_label.call_api_fallback([{"role": "user", "content": "test"}])
         finally:
             run_label.API_MODELS = old_models
 
@@ -399,14 +399,11 @@ class ApiFallbackTests(unittest.TestCase):
         old_models = run_label.API_MODELS
         run_label.API_MODELS = [model]
         try:
-            with (
-                patch.object(
-                    run_label,
-                    "_call_api_fallback_once",
-                    side_effect=run_label.ModelCallError("context budget exceeded"),
-                ),
-                patch.object(run_label.time, "sleep") as sleep,
-            ):
+            with patch.object(
+                run_label,
+                "_call_api_fallback_once",
+                side_effect=run_label.ModelCallError("context budget exceeded"),
+            ), patch.object(run_label.time, "sleep") as sleep:
                 with self.assertRaises(run_label.ModelCallError):
                     run_label.call_api_fallback([{"role": "user", "content": "test"}])
         finally:
@@ -446,11 +443,16 @@ class ApiFallbackTests(unittest.TestCase):
         old_trace = run_label.API_CALL_TRACE
         run_label.API_CALL_TRACE = []
         try:
-            with (
-                patch.object(run_label, "_api_model_iteration_order", return_value=[first, second]),
-                patch.object(run_label, "_api_chat", side_effect=fake_chat),
-                patch.object(run_label, "temp_log_event"),
-                patch.object(run_label, "API_RETRIES", 3),
+            with patch.object(
+                run_label,
+                "_api_model_iteration_order",
+                return_value=[first, second],
+            ), patch.object(
+                run_label, "_api_chat", side_effect=fake_chat
+            ), patch.object(
+                run_label, "temp_log_event"
+            ), patch.object(
+                run_label, "API_RETRIES", 3
             ):
                 _, _, _, tool_calls = run_label.call_api_fallback(
                     [{"role": "user", "content": "return structured output"}],
@@ -462,6 +464,57 @@ class ApiFallbackTests(unittest.TestCase):
 
         self.assertEqual(["pooled-a", "pooled-b"], calls)
         self.assertEqual("submit_result", tool_calls[0]["function"]["name"])
+
+    def test_structured_caller_can_receive_prose_for_correction_round(self):
+        first = ApiModel(
+            "pooled-a",
+            "model",
+            "https://example.invalid",
+            "key-a",
+            round_robin_group="provider-pool",
+        )
+        second = ApiModel(
+            "pooled-b",
+            "model",
+            "https://example.invalid",
+            "key-b",
+            round_robin_group="provider-pool",
+        )
+        calls = []
+
+        def fake_chat(model, *_args, **_kwargs):
+            calls.append(model.name)
+            return "complete analysis without a tool call", 10, 20, []
+
+        tool = {"type": "function", "function": {"name": "submit_result", "parameters": {"type": "object"}}}
+        choice = {"type": "function", "function": {"name": "submit_result"}}
+        old_trace = run_label.API_CALL_TRACE
+        run_label.API_CALL_TRACE = []
+        try:
+            with patch.object(
+                run_label,
+                "_api_model_iteration_order",
+                return_value=[first, second],
+            ), patch.object(
+                run_label, "_api_chat", side_effect=fake_chat
+            ), patch.object(
+                run_label, "temp_log_event"
+            ), patch.object(
+                run_label, "API_RETRIES", 3
+            ):
+                text, _, _, tool_calls = run_label.call_api_fallback(
+                    [{"role": "user", "content": "return structured output"}],
+                    tools=[tool],
+                    tool_choice=choice,
+                    accept_text_when_tool_missing=True,
+                )
+        finally:
+            run_label.API_CALL_TRACE = old_trace
+
+        self.assertEqual(["pooled-a"], calls)
+        self.assertIn("complete analysis", text)
+        self.assertEqual([], tool_calls)
+        self.assertTrue(run_label.API_CALL_TRACE is old_trace)
 
 
 if __name__ == "__main__":
