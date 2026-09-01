@@ -11,11 +11,14 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from volume_review import (  # noqa: E402
+    JURY_ORIENTATIONS,
+    JURY_SPECS,
     VERDICT_TOOL,
     VolumeReviewRuntime,
     VolumeSecondPassReviewer,
     _structured_payloads_from_text,
     build_review_units,
+    build_scene_review_units,
     derive_deterministic_sequence_constraints,
     format_review_packet,
 )
@@ -78,16 +81,16 @@ class FakeModel:
         return "", 10, 5, [tool_call]
 
 
-class FailingModel(FakeModel):
-    def __init__(self, speaker_by_id, fail_after):
-        super().__init__(speaker_by_id)
-        self.fail_after = fail_after
-
+class AlwaysFailModel(FakeModel):
     def __call__(self, messages, *, tools, label, **kwargs):
-        if self.calls >= self.fail_after:
-            self.calls += 1
-            raise RuntimeError("simulated provider interruption")
-        return super().__call__(messages, tools=tools, label=label, **kwargs)
+        self.calls += 1
+        raise RuntimeError("simulated permanent malformed response")
+
+
+class InterruptingModel(FakeModel):
+    def __call__(self, messages, *, tools, label, **kwargs):
+        self.calls += 1
+        raise KeyboardInterrupt("simulated user interruption")
 
 
 class ProseThenToolModel(FakeModel):
@@ -128,6 +131,17 @@ class ProseVerdictWithJsonCompilerModel(FakeModel):
         return json.dumps(payload, ensure_ascii=False), 10, 5, []
 
 
+class FailOnSecondRecoveryTargetModel(FakeModel):
+    def __call__(self, messages, *, tools, label, **kwargs):
+        user_text = "\n".join(
+            message["content"] for message in messages if message.get("role") == "user"
+        )
+        if "D1 only" in user_text:
+            self.calls += 1
+            raise RuntimeError("simulated second-item interruption")
+        return super().__call__(messages, tools=tools, label=label, **kwargs)
+
+
 def runtime_for(model):
     return VolumeReviewRuntime(
         call_model=model,
@@ -136,8 +150,39 @@ def runtime_for(model):
         is_valid_speaker=lambda value: bool(valid_speaker(value)),
         same_speaker=lambda left, right: left == right,
         canonicalize_speaker=lambda value: (value, ""),
+        is_generic_speaker=lambda value: value in {"少年", "店员", "路人"},
         retries=1,
+        task_retries=1,
+        task_retry_delay=0,
+        sleep=lambda _seconds: None,
     )
+
+
+def strong_verdict(speaker, *, basis="explicit_attribution", quote_type="direct_speech"):
+    return {
+        "id": "D0",
+        "speaker": speaker,
+        "quote_type": quote_type,
+        "evidence_basis": basis,
+        "confidence": "high",
+        "citations": [1],
+        "reason": "Local source evidence supports this assignment.",
+    }
+
+
+def mirrored_records(speakers_by_role):
+    records = []
+    for jury_role, _instruction in JURY_SPECS:
+        values = speakers_by_role[jury_role]
+        for (orientation, _reverse), speaker in zip(JURY_ORIENTATIONS, values):
+            records.append(
+                {
+                    "jury_role": jury_role,
+                    "orientation": orientation,
+                    "verdict": strong_verdict(speaker),
+                }
+            )
+    return records
 
 
 class VolumeReviewStructureTests(unittest.TestCase):
@@ -166,6 +211,24 @@ class VolumeReviewStructureTests(unittest.TestCase):
         self.assertEqual((8, 16), (units[1]["focus_start"], units[1]["focus_end"]))
         self.assertEqual(5, units[1]["context_start"])
         self.assertEqual(19, units[1]["context_end"])
+
+    def test_scene_review_units_split_at_a_strong_narrative_gap(self):
+        novel = ["角色甲说：「第一句。」"]
+        novel.extend(["叙述。"] * 20)
+        novel.append("角色乙说：「第二句。」")
+        dialogues = [(1, "第一句。"), (22, "第二句。")]
+
+        units = build_scene_review_units(
+            novel,
+            dialogues,
+            focus_size=8,
+            context_radius=1,
+        )
+
+        self.assertEqual(2, len(units))
+        self.assertEqual((0, 1), (units[0]["focus_start"], units[0]["focus_end"]))
+        self.assertEqual((1, 2), (units[1]["focus_start"], units[1]["focus_end"]))
+        self.assertTrue(all(str(unit["unit_id"]).startswith("R2-S") for unit in units))
 
     def test_packet_marks_exact_focus_and_provisional_visibility(self):
         novel = ["角色甲说：「第一句。」角色乙回答：「第二句。」"]
@@ -241,8 +304,183 @@ class VolumeReviewStructureTests(unittest.TestCase):
         )
 
 
+class VolumeReviewDecisionGateTests(unittest.TestCase):
+    def make_reviewer(self, root):
+        return VolumeSecondPassReviewer(
+            runtime_for(FakeModel({"D0": "角色甲"})),
+            novel_path=str(root / "novel.txt"),
+            labeled_path=str(root / "labeled.txt"),
+            vault_path=str(root / "evidence_vault.json"),
+            review_log_path=str(root / "volume_review.jsonl"),
+            temp_log_path=str(root / "volume_review.temp.jsonl"),
+            state_path=str(root / "volume_review_state.json"),
+            first_pass_path=str(root / "labeled.first_pass.txt"),
+        )
+
+    def test_mirrored_jury_rejects_order_unstable_support(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            reviewer = self.make_reviewer(Path(temp_dir))
+            speakers = {}
+            for index, (jury_role, _instruction) in enumerate(JURY_SPECS):
+                if index < 2:
+                    speakers[jury_role] = ("新标签", "新标签")
+                elif index == 2:
+                    speakers[jury_role] = ("新标签", "旧标签")
+                else:
+                    speakers[jury_role] = ("旧标签", "旧标签")
+
+            assessment = reviewer._assess_mirrored_jury(
+                "旧标签",
+                "新标签",
+                mirrored_records(speakers),
+            )
+
+            self.assertFalse(assessment["passes_general_gate"])
+            self.assertEqual(2, assessment["candidate_pair_support"])
+            self.assertEqual(1, assessment["baseline_pair_support"])
+            self.assertEqual(1, len(assessment["unstable_roles"]))
+
+    def test_three_of_four_stable_mirrored_roles_can_pass(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            reviewer = self.make_reviewer(Path(temp_dir))
+            speakers = {
+                jury_role: (
+                    ("新标签", "新标签")
+                    if index < 3 else ("旧标签", "旧标签")
+                )
+                for index, (jury_role, _instruction) in enumerate(JURY_SPECS)
+            }
+
+            assessment = reviewer._assess_mirrored_jury(
+                "旧标签",
+                "新标签",
+                mirrored_records(speakers),
+            )
+
+            self.assertTrue(assessment["passes_general_gate"])
+            self.assertEqual(3, assessment["candidate_pair_support"])
+
+    def test_named_to_generic_requires_all_pairs_and_direct_binding(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            reviewer = self.make_reviewer(Path(temp_dir))
+            all_candidate = {
+                jury_role: ("少年", "少年")
+                for jury_role, _instruction in JURY_SPECS
+            }
+            assessment = reviewer._assess_mirrored_jury(
+                "角色甲",
+                "少年",
+                mirrored_records(all_candidate),
+            )
+            candidate_group = {
+                "speaker": "少年",
+                "evidence_families": ["chronology", "quote-scope"],
+                "strong_reports": [
+                    {"agent": "VolumeBlindForward", **strong_verdict("少年")},
+                    {"agent": "VolumeQuoteScope", **strong_verdict("少年")},
+                ],
+            }
+
+            blocked, reason = reviewer._transition_gate(
+                baseline="角色甲",
+                candidate="少年",
+                candidate_group=candidate_group,
+                jury_assessment=assessment,
+                novel_lines=["门被推开了。"],
+                target_line=1,
+                canonical_note="",
+            )
+            wrong_quote_bound, wrong_quote_reason = reviewer._transition_gate(
+                baseline="角色甲",
+                candidate="少年",
+                candidate_group=candidate_group,
+                jury_assessment=assessment,
+                novel_lines=["少年说道：「前一句。」角色甲说道：「目标句。」"],
+                target_line=1,
+                canonical_note="",
+                occurrence={
+                    "scope_before": "角色甲说道：",
+                    "scope_after": "",
+                },
+            )
+            allowed, allowed_reason = reviewer._transition_gate(
+                baseline="角色甲",
+                candidate="少年",
+                candidate_group=candidate_group,
+                jury_assessment=assessment,
+                novel_lines=["少年说道：「目标句。」"],
+                target_line=1,
+                canonical_note="",
+            )
+
+            self.assertFalse(blocked)
+            self.assertIn("direct", reason)
+            self.assertFalse(wrong_quote_bound)
+            self.assertIn("direct", wrong_quote_reason)
+            self.assertTrue(allowed)
+            self.assertIn("direct", allowed_reason)
+
+    def test_nonperson_change_requires_both_boundary_specialists(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            reviewer = self.make_reviewer(Path(temp_dir))
+            all_nonperson = {
+                jury_role: ("非人物发声", "非人物发声")
+                for jury_role, _instruction in JURY_SPECS
+            }
+            assessment = reviewer._assess_mirrored_jury(
+                "角色甲",
+                "非人物发声",
+                mirrored_records(all_nonperson),
+            )
+            scope_report = {
+                "agent": "VolumeQuoteScope",
+                **strong_verdict(
+                    "非人物发声",
+                    basis="quote_type",
+                    quote_type="thought_or_narration",
+                ),
+            }
+            candidate_group = {
+                "speaker": "非人物发声",
+                "evidence_families": ["quote-scope", "voice-boundary"],
+                "strong_reports": [scope_report],
+            }
+
+            blocked, _reason = reviewer._transition_gate(
+                baseline="角色甲",
+                candidate="非人物发声",
+                candidate_group=candidate_group,
+                jury_assessment=assessment,
+                novel_lines=["「目标句。」"],
+                target_line=1,
+                canonical_note="",
+            )
+            candidate_group["strong_reports"].append(
+                {
+                    "agent": "VolumeVoiceBoundary",
+                    **strong_verdict(
+                        "非人物发声",
+                        basis="quote_type",
+                        quote_type="thought_or_narration",
+                    ),
+                }
+            )
+            allowed, _allowed_reason = reviewer._transition_gate(
+                baseline="角色甲",
+                candidate="非人物发声",
+                candidate_group=candidate_group,
+                jury_assessment=assessment,
+                novel_lines=["「目标句。」"],
+                target_line=1,
+                canonical_note="",
+            )
+
+            self.assertFalse(blocked)
+            self.assertTrue(allowed)
+
+
 class VolumeReviewRunTests(unittest.TestCase):
-    def make_reviewer(self, root, model, *, retries=1):
+    def make_reviewer(self, root, model, *, retries=1, progress_callback=None):
         runtime = runtime_for(model)
         runtime.retries = retries
         return VolumeSecondPassReviewer(
@@ -256,6 +494,7 @@ class VolumeReviewRunTests(unittest.TestCase):
             first_pass_path=str(root / "labeled.first_pass.txt"),
             focus_size=2,
             context_radius=1,
+            progress_callback=progress_callback,
         )
 
     def test_full_review_is_atomic_and_idempotent(self):
@@ -289,6 +528,35 @@ class VolumeReviewRunTests(unittest.TestCase):
                 root.joinpath("labeled.txt").read_text(encoding="utf-8"),
             )
 
+    def test_review_reports_durable_phase_progress(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            root.joinpath("novel.txt").write_text(
+                "角色甲说：「第一句。」\n", encoding="utf-8"
+            )
+            root.joinpath("labeled.txt").write_text("角色甲\n", encoding="utf-8")
+            root.joinpath("evidence_vault.json").write_text(
+                '{"characters": {}}', encoding="utf-8"
+            )
+            events = []
+            reviewer = self.make_reviewer(
+                root,
+                FakeModel({"D0": "角色甲"}),
+                progress_callback=events.append,
+            )
+
+            reviewer.run([(1, "第一句。")])
+
+            scene_updates = [
+                event for event in events
+                if event.get("event") == "task_complete"
+                and event.get("phase") == "scene-review"
+            ]
+            self.assertEqual(9, len(scene_updates))
+            self.assertEqual((9, 9), (scene_updates[-1]["completed"], scene_updates[-1]["total"]))
+            state = json.loads(root.joinpath("volume_review_state.json").read_text(encoding="utf-8"))
+            self.assertEqual("complete", state["progress"]["phase"])
+
     def test_unanimous_review_and_jury_can_rewrite(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -320,10 +588,10 @@ class VolumeReviewRunTests(unittest.TestCase):
             root.joinpath("evidence_vault.json").write_text(
                 '{"characters": {}}', encoding="utf-8"
             )
-            model = FailingModel({"D0": "角色甲", "D1": "角色乙"}, fail_after=1)
+            model = InterruptingModel({"D0": "角色甲", "D1": "角色乙"})
             reviewer = self.make_reviewer(root, model)
 
-            with self.assertRaisesRegex(RuntimeError, "simulated provider interruption"):
+            with self.assertRaisesRegex(KeyboardInterrupt, "simulated user interruption"):
                 reviewer.run([(1, "第一句。"), (2, "第二句。")])
 
             self.assertEqual(original, root.joinpath("labeled.txt").read_text(encoding="utf-8"))
@@ -333,6 +601,93 @@ class VolumeReviewRunTests(unittest.TestCase):
             )
             state = json.loads(root.joinpath("volume_review_state.json").read_text(encoding="utf-8"))
             self.assertFalse(state["completed"])
+
+    def test_permanently_bad_reviewer_abstains_without_aborting_volume(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            root.joinpath("novel.txt").write_text(
+                "角色甲说：「第一句。」\n", encoding="utf-8"
+            )
+            root.joinpath("labeled.txt").write_text("角色甲\n", encoding="utf-8")
+            root.joinpath("evidence_vault.json").write_text(
+                '{"characters": {}}', encoding="utf-8"
+            )
+            reviewer = self.make_reviewer(
+                root,
+                AlwaysFailModel({"D0": "角色甲"}),
+            )
+
+            result = reviewer.run([(1, "第一句。")])
+
+            self.assertEqual("complete", result["status"])
+            self.assertEqual(9, result["summary"]["unit_abstentions"])
+            self.assertEqual(0, result["summary"]["changed"])
+            self.assertEqual(
+                "角色甲\n",
+                root.joinpath("labeled.txt").read_text(encoding="utf-8"),
+            )
+
+    def test_split_batch_resume_reuses_completed_single_items(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            for name, content in {
+                "novel.txt": "角色甲说：「第一句。」\n角色乙说：「第二句。」\n",
+                "labeled.txt": "角色甲\n角色乙\n",
+                "evidence_vault.json": '{"characters": {}}',
+            }.items():
+                root.joinpath(name).write_text(content, encoding="utf-8")
+            first_model = FailOnSecondRecoveryTargetModel(
+                {"D0": "角色甲", "D1": "角色乙"}
+            )
+            first = self.make_reviewer(root, first_model)
+            user_content = """[Exact quote ledger]
+D0 [FOCUS] L1 quote#1: 「第一句。」
+D1 [FOCUS] L2 quote#1: 「第二句。」
+
+[Raw novel excerpt]
+L1: 角色甲说：「第一句。」
+L2: 角色乙说：「第二句。」
+"""
+            validator = lambda args: first._validate_assignments(
+                args, {"D0", "D1"}, {1, 2}
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "second-item interruption"):
+                first._recover_assignments_individually(
+                    agent="VolumeBlindForward",
+                    system_prompt=first._review_system_prompt(
+                        "VolumeBlindForward", "Reconstruct chronology."
+                    ),
+                    user_content=user_content,
+                    validator=validator,
+                    record_meta={"kind": "unit", "unit_id": "U-test"},
+                    required_ids={"D0", "D1"},
+                    allowed_lines={1, 2},
+                    batch_error="simulated malformed batch",
+                )
+
+            second_model = FakeModel({"D0": "角色甲", "D1": "角色乙"})
+            second = self.make_reviewer(root, second_model)
+            recovered = second._recover_assignments_individually(
+                agent="VolumeBlindForward",
+                system_prompt=second._review_system_prompt(
+                    "VolumeBlindForward", "Reconstruct chronology."
+                ),
+                user_content=user_content,
+                validator=lambda args: second._validate_assignments(
+                    args, {"D0", "D1"}, {1, 2}
+                ),
+                record_meta={"kind": "unit", "unit_id": "U-test"},
+                required_ids={"D0", "D1"},
+                allowed_lines={1, 2},
+                batch_error="resume",
+            )
+
+            self.assertEqual(1, second_model.calls)
+            self.assertEqual(
+                ["D0", "D1"],
+                [item["id"] for item in recovered["assignments"]],
+            )
 
     def test_failed_batch_is_recovered_by_single_target_review(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -350,19 +705,19 @@ class VolumeReviewRunTests(unittest.TestCase):
             result = reviewer.run([(1, "第一句。")])
 
             self.assertEqual("complete", result["status"])
-            self.assertEqual(14, model.calls)
+            self.assertEqual(18, model.calls)
             rejected = [
                 json.loads(line)
                 for line in root.joinpath("volume_review.temp.jsonl").read_text(encoding="utf-8").splitlines()
                 if '"review_call_rejected"' in line
             ]
-            self.assertEqual(7, len(rejected))
+            self.assertEqual(9, len(rejected))
             split_completions = [
                 json.loads(line)
                 for line in root.joinpath("volume_review.temp.jsonl").read_text(encoding="utf-8").splitlines()
                 if '"review_batch_split_complete"' in line
             ]
-            self.assertEqual(7, len(split_completions))
+            self.assertEqual(9, len(split_completions))
 
     def test_failed_single_verdict_is_recovered_with_compact_context(self):
         with tempfile.TemporaryDirectory() as temp_dir:

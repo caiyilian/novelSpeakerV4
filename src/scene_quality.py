@@ -264,10 +264,10 @@ class SceneQualityRuntime:
     non_person_label: str
     request_timeout: int = 180
     retries: int = 2
-    deep_tool_rounds: int = 8
-    deep_token_budget: int = 60000
-    context_limit: int = 40000
-    max_output_tokens: int = 4096
+    deep_tool_rounds: int = 12
+    deep_token_budget: int = 200000
+    context_limit: int = 262144
+    max_output_tokens: int = 16384
 
 
 class SceneSequenceAudit:

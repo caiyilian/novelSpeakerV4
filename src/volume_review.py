@@ -15,9 +15,10 @@ from pathlib import Path
 from typing import Any, Callable
 
 from quote_occurrence import align_quote_occurrences
+from scene_sequence import build_scene_segments
 
 
-REVIEW_VERSION = 1
+REVIEW_VERSION = 2
 QUOTE_TYPES = {
     "direct_speech",
     "partial_speech",
@@ -94,6 +95,21 @@ REVIEW_AGENT_SPECS = (
         False,
     ),
     (
+        "VolumeVoiceBoundary",
+        "First decide whether each exact quote is spoken by a story-world person at all. Separate direct or "
+        "conveyed human speech from thought, narration, displayed text, quoted wording and non-human sound. "
+        "Only after that boundary is settled may you identify the speaker. You are blind to provisional labels.",
+        False,
+    ),
+    (
+        "VolumeIdentityResolver",
+        "Resolve naming specificity from the dynamically supplied identity evidence. When a temporary role, "
+        "appearance or title is proven to be a named person, return the verified name. Never infer an identity "
+        "from style or topic, and never downgrade a known name to a vague descriptor without direct contrary "
+        "attribution. You are blind to provisional labels.",
+        False,
+    ),
+    (
         "VolumeBaselineFalsifier",
         "Treat every provisional label as a fallible hypothesis. Search for the strongest raw-text contradiction, "
         "then keep or replace it. Prefer a verified personal identity over a temporary role when the evidence "
@@ -114,7 +130,28 @@ JURY_SPECS = (
         "VolumeJuryScopeSkeptic",
         "Audit exact quote scope and actively falsify the apparent majority before deciding.",
     ),
+    (
+        "VolumeJuryDialogueBoundary",
+        "Reconstruct adjacent question-answer, continuation, interruption and delayed-attribution boundaries. "
+        "Reject a hypothesis that only works under mechanical alternation.",
+    ),
 )
+JURY_ORIENTATIONS = (
+    ("baseline-first", False),
+    ("alternative-first", True),
+)
+REVIEW_AGENT_FAMILIES = {
+    "VolumeBlindForward": "chronology",
+    "VolumeBlindReverse": "chronology",
+    "VolumeQuoteScope": "quote-scope",
+    "VolumeDialogueAct": "dialogue-act",
+    "VolumeTurnBoundary": "dialogue-act",
+    "VolumeFloorHolder": "chronology",
+    "VolumeVoiceBoundary": "voice-boundary",
+    "VolumeIdentityResolver": "identity",
+    "VolumeBaselineFalsifier": "falsification",
+}
+NONPERSON_QUOTE_TYPES = {"thought_or_narration", "sound_or_text"}
 
 ASSIGNMENT_TOOL = {
     "type": "function",
@@ -225,8 +262,12 @@ class VolumeReviewRuntime:
     is_valid_speaker: Callable[[str], bool]
     same_speaker: Callable[[str, str], bool]
     canonicalize_speaker: Callable[[str], tuple[str, str]]
+    is_generic_speaker: Callable[[str], bool] = lambda _value: False
     request_timeout: int = 300
     retries: int = 2
+    task_retries: int = 4
+    task_retry_delay: float = 10.0
+    sleep: Callable[[float], None] = time.sleep
     non_person_label: str = "非人物发声"
 
 
@@ -309,6 +350,93 @@ def build_review_units(
             }
         )
     return units
+
+
+def build_scene_review_units(
+    novel_lines: list[str],
+    dialogue_list: list[tuple[int, str]],
+    *,
+    focus_size: int = 8,
+    context_radius: int = 5,
+    max_raw_span: int = 180,
+) -> list[dict[str, int | str]]:
+    """Align review focus blocks to stable scene boundaries."""
+    context_radius = max(0, int(context_radius))
+    segments = build_scene_segments(
+        novel_lines,
+        dialogue_list,
+        max_turns=max(4, int(focus_size)),
+        max_raw_span=max(30, int(max_raw_span)),
+        raw_padding=0,
+    )
+    units: list[dict[str, int | str]] = []
+    for segment in segments:
+        focus_start = int(segment["start_index"])
+        focus_end = int(segment["end_index"])
+        units.append(
+            {
+                "unit_id": f"R{REVIEW_VERSION}-{segment['scene_id']}",
+                "focus_start": focus_start,
+                "focus_end": focus_end,
+                "context_start": max(0, focus_start - context_radius),
+                "context_end": min(len(dialogue_list), focus_end + context_radius),
+                "scene_id": str(segment["scene_id"]),
+            }
+        )
+    return units
+
+
+def _report_is_strong(report: dict[str, Any]) -> bool:
+    return bool(
+        report.get("confidence") in {"high", "medium"}
+        and report.get("citations")
+        and report.get("evidence_basis") not in {"unknown", "inference"}
+    )
+
+
+def _has_local_speaker_binding(
+    speaker: str,
+    citations: set[int],
+    novel_lines: list[str],
+    *,
+    target_line: int,
+    occurrence: dict[str, Any] | None = None,
+) -> bool:
+    """Require a local grammatical speaker binding for risky descriptor changes."""
+    speaker = str(speaker or "").strip()
+    if not speaker or not citations:
+        return False
+    subject_pattern = re.compile(
+        rf"(?:^|[。！？；，：、\s]){re.escape(speaker)}"
+        rf"[^。！？；]{{0,24}}?{SPEECH_ATTRIBUTION_RE.pattern}"
+    )
+    if occurrence is not None:
+        if any(
+            subject_pattern.search(str(occurrence.get(scope) or ""))
+            for scope in ("scope_before", "scope_after")
+        ):
+            return True
+        adjacent = []
+        if target_line - 1 in citations and target_line > 1:
+            previous = str(novel_lines[target_line - 2]).strip()
+            if re.search(r"[:：]\s*$", previous):
+                adjacent.append(previous)
+        if target_line + 1 in citations and target_line < len(novel_lines):
+            following = str(novel_lines[target_line]).strip()
+            if not re.search(r"[:：]\s*$", following):
+                adjacent.append(following)
+        return any(subject_pattern.search(text) for text in adjacent)
+
+    candidate_lines = {
+        line_num + offset
+        for line_num in citations | {target_line}
+        for offset in (-1, 0, 1)
+        if 1 <= line_num + offset <= len(novel_lines)
+    }
+    for line_num in sorted(candidate_lines):
+        if subject_pattern.search(str(novel_lines[line_num - 1])):
+            return True
+    return False
 
 
 def derive_deterministic_sequence_constraints(
@@ -633,8 +761,8 @@ def format_review_packet(
     unit: dict[str, int | str],
     *,
     include_provisional: bool,
-    raw_padding: int = 20,
-    max_raw_chars: int = 26000,
+    raw_padding: int = 80,
+    max_raw_chars: int = 120000,
 ) -> tuple[str, set[str], set[int]]:
     """Format a review packet that preserves exact quote occurrences and focus ids."""
     context_start = int(unit["context_start"])
@@ -715,6 +843,8 @@ class VolumeSecondPassReviewer:
         first_pass_path: str,
         focus_size: int = 8,
         context_radius: int = 5,
+        max_raw_span: int = 180,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ):
         self.runtime = runtime
         self.novel_path = novel_path
@@ -726,7 +856,105 @@ class VolumeSecondPassReviewer:
         self.first_pass_path = first_pass_path
         self.focus_size = max(1, int(focus_size))
         self.context_radius = max(0, int(context_radius))
+        self.max_raw_span = max(30, int(max_raw_span))
+        self.progress_callback = progress_callback
         self.model_calls = 0
+
+    def _emit_progress(self, event: str, **payload: Any) -> None:
+        record = {
+            "event": event,
+            "model_calls": self.model_calls,
+            "time": time.time(),
+            **payload,
+        }
+        if self.progress_callback is not None:
+            self.progress_callback(record)
+
+    def _checkpoint_progress(self, **progress: Any) -> None:
+        state = _load_json(self.state_path)
+        state["progress"] = {
+            **progress,
+            "model_calls_this_process": self.model_calls,
+            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        }
+        _write_json_atomic(self.state_path, state)
+
+    def _run_resilient_task(
+        self,
+        operation: Callable[[], Any],
+        *,
+        task_meta: dict[str, Any],
+        abstain_factory: Callable[[str], Any] | None = None,
+    ) -> Any:
+        """Retry one durable review task without discarding completed neighbors."""
+        attempts = max(1, int(self.runtime.task_retries))
+        last_error = "review task failed"
+        for task_attempt in range(1, attempts + 1):
+            try:
+                return operation()
+            except Exception as exc:
+                last_error = f"{type(exc).__name__}: {str(exc)[:1200]}"
+                retry_record = {
+                    "event": "review_task_failed",
+                    "task_attempt": task_attempt,
+                    "task_attempts": attempts,
+                    "error": last_error,
+                    **task_meta,
+                    "time": time.time(),
+                }
+                _append_jsonl(self.temp_log_path, retry_record)
+                if task_attempt >= attempts:
+                    if abstain_factory is not None:
+                        _append_jsonl(
+                            self.temp_log_path,
+                            {
+                                "event": "review_task_abstained",
+                                "task_attempt": task_attempt,
+                                "task_attempts": attempts,
+                                "error": last_error,
+                                **task_meta,
+                                "time": time.time(),
+                            },
+                        )
+                        self._emit_progress(
+                            "task_abstained",
+                            task_attempt=task_attempt,
+                            task_attempts=attempts,
+                            error=last_error,
+                            **task_meta,
+                        )
+                        return abstain_factory(last_error)
+                    self._emit_progress(
+                        "task_exhausted",
+                        task_attempt=task_attempt,
+                        task_attempts=attempts,
+                        error=last_error,
+                        **task_meta,
+                    )
+                    raise
+                delay = min(
+                    180.0,
+                    max(0.0, float(self.runtime.task_retry_delay)) * (2 ** (task_attempt - 1)),
+                )
+                self._checkpoint_progress(
+                    phase=task_meta.get("phase", "review"),
+                    status="retry-wait",
+                    task_attempt=task_attempt,
+                    task_attempts=attempts,
+                    retry_in_seconds=delay,
+                    last_error=last_error,
+                    current_task=task_meta,
+                )
+                self._emit_progress(
+                    "task_retry_wait",
+                    task_attempt=task_attempt,
+                    task_attempts=attempts,
+                    wait_seconds=delay,
+                    error=last_error,
+                    **task_meta,
+                )
+                self.runtime.sleep(delay)
+        raise RuntimeError(last_error)
 
     def _fingerprint(self) -> str:
         digest = hashlib.sha256()
@@ -736,6 +964,7 @@ class VolumeSecondPassReviewer:
                 digest.update(_sha256_file(path).encode("ascii"))
         digest.update(str(self.focus_size).encode("ascii"))
         digest.update(str(self.context_radius).encode("ascii"))
+        digest.update(str(self.max_raw_span).encode("ascii"))
         return digest.hexdigest()
 
     def _prepare_run(self, source_fingerprint: str, *, restart: bool) -> dict[str, Any]:
@@ -744,6 +973,7 @@ class VolumeSecondPassReviewer:
         if (
             not restart
             and state.get("completed")
+            and state.get("version") == REVIEW_VERSION
             and state.get("final_labeled_sha256") == current_hash
         ):
             return {"skip": True, "state": state}
@@ -767,6 +997,7 @@ class VolumeSecondPassReviewer:
                 "started_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
                 "focus_size": self.focus_size,
                 "context_radius": self.context_radius,
+                "max_raw_span": self.max_raw_span,
             }
             _write_json_atomic(self.state_path, state)
         elif not os.path.exists(self.first_pass_path):
@@ -817,6 +1048,7 @@ class VolumeSecondPassReviewer:
             return False, None, candidate_error
 
         for attempt in range(1, batch_attempts + 1):
+            call_label = f"{agent}-A{attempt}"
             _append_jsonl(
                 self.temp_log_path,
                 {
@@ -827,11 +1059,18 @@ class VolumeSecondPassReviewer:
                     "time": time.time(),
                 },
             )
+            self._emit_progress(
+                "model_call_start",
+                agent=agent,
+                attempt=attempt,
+                label=call_label,
+                **record_meta,
+            )
             try:
                 text, pec, ec, tool_calls = self.runtime.call_model(
                     messages,
                     tools=[tool],
-                    label=f"{agent}-A{attempt}",
+                    label=call_label,
                     request_timeout=self.runtime.request_timeout,
                     tool_choice={"type": "function", "function": {"name": expected_name}},
                     accept_text_when_tool_missing=True,
@@ -946,11 +1185,19 @@ class VolumeSecondPassReviewer:
                     "time": time.time(),
                 },
             )
+            serializer_label = f"{agent}-Serializer-A{attempt}"
+            self._emit_progress(
+                "model_call_start",
+                agent=agent,
+                attempt=attempt,
+                label=serializer_label,
+                **record_meta,
+            )
             try:
                 serializer_text, serializer_pec, serializer_ec, serializer_calls = self.runtime.call_model(
                     serializer_messages,
                     tools=None,
-                    label=f"{agent}-Serializer-A{attempt}",
+                    label=serializer_label,
                     request_timeout=self.runtime.request_timeout,
                 )
             except Exception as exc:
@@ -1098,8 +1345,23 @@ class VolumeSecondPassReviewer:
                 "time": time.time(),
             },
         )
+        completed_items: dict[str, dict[str, Any]] = {}
+        for existing in _load_jsonl(self.review_log_path):
+            if (
+                existing.get("kind") == "unit-item"
+                and existing.get("status") == "complete"
+                and existing.get("unit_id") == record_meta.get("unit_id")
+                and existing.get("agent") == agent
+            ):
+                item_id = str(existing.get("dialogue_id") or "")
+                assignment = existing.get("assignment")
+                if item_id and isinstance(assignment, dict):
+                    completed_items[item_id] = assignment
         assignments: list[dict[str, Any]] = []
         for dialogue_id in ordered_ids:
+            if dialogue_id in completed_items:
+                assignments.append(dict(completed_items[dialogue_id]))
+                continue
             single_agent = f"{agent}SingleTarget"
             single_system = f"""You are {single_agent}, recovering one item from a failed batch novel-speaker review.
 
@@ -1134,19 +1396,30 @@ Analyze exactly the one target id named at the end of the user message. Ignore e
                 ),
                 record_meta=single_meta,
             )
-            assignments.append(
+            assignment = {
+                key: verdict[key]
+                for key in (
+                    "id",
+                    "speaker",
+                    "quote_type",
+                    "evidence_basis",
+                    "confidence",
+                    "citations",
+                    "reason",
+                )
+            }
+            assignments.append(assignment)
+            _append_jsonl(
+                self.review_log_path,
                 {
-                    key: verdict[key]
-                    for key in (
-                        "id",
-                        "speaker",
-                        "quote_type",
-                        "evidence_basis",
-                        "confidence",
-                        "citations",
-                        "reason",
-                    )
-                }
+                    "kind": "unit-item",
+                    "status": "complete",
+                    "unit_id": record_meta.get("unit_id"),
+                    "agent": agent,
+                    "dialogue_id": dialogue_id,
+                    "assignment": assignment,
+                    "time": time.time(),
+                },
             )
 
         recovered = {"assignments": assignments}
@@ -1209,6 +1482,7 @@ Use only the compact evidence packet. Do not restate or summarize it. Check exac
         ]
         last_error = original_error
         for attempt in range(1, max(1, self.runtime.retries) + 1):
+            call_label = f"{agent}-Compact-A{attempt}"
             _append_jsonl(
                 self.temp_log_path,
                 {
@@ -1221,11 +1495,18 @@ Use only the compact evidence packet. Do not restate or summarize it. Check exac
                     "time": time.time(),
                 },
             )
+            self._emit_progress(
+                "model_call_start",
+                agent=agent,
+                attempt=attempt,
+                label=call_label,
+                **record_meta,
+            )
             try:
                 text, pec, ec, tool_calls = self.runtime.call_model(
                     messages,
                     tools=[VERDICT_TOOL],
-                    label=f"{agent}-Compact-A{attempt}",
+                    label=call_label,
                     request_timeout=self.runtime.request_timeout,
                     tool_choice={
                         "type": "function",
@@ -1360,12 +1641,20 @@ Use only the compact evidence packet. Do not restate or summarize it. Check exac
                     "time": time.time(),
                 },
             )
+            serializer_label = f"{agent}-CompactSerializer-A{attempt}"
+            self._emit_progress(
+                "model_call_start",
+                agent=agent,
+                attempt=attempt,
+                label=serializer_label,
+                **record_meta,
+            )
             try:
                 serializer_text, serializer_pec, serializer_ec, serializer_calls = (
                     self.runtime.call_model(
                         serializer_messages,
                         tools=None,
-                        label=f"{agent}-CompactSerializer-A{attempt}",
+                        label=serializer_label,
                         request_timeout=self.runtime.request_timeout,
                     )
                 )
@@ -1592,6 +1881,213 @@ Use only the compact evidence packet. Do not restate or summarize it. Check exac
         groups.sort(key=lambda item: len(item["reports"]), reverse=True)
         return groups
 
+    def _supported_alternative_groups(
+        self,
+        groups: list[dict[str, Any]],
+        baseline: str,
+        *,
+        limit: int = 2,
+    ) -> list[dict[str, Any]]:
+        supported: list[dict[str, Any]] = []
+        for group in groups:
+            speaker = str(group.get("speaker") or "")
+            if not speaker or self.runtime.same_speaker(speaker, baseline):
+                continue
+            strong_reports = [
+                report for report in group.get("reports") or []
+                if _report_is_strong(report)
+            ]
+            families = {
+                REVIEW_AGENT_FAMILIES.get(str(report.get("agent") or ""), "other")
+                for report in strong_reports
+                if report.get("agent") != "VolumeBaselineFalsifier"
+            }
+            if len(strong_reports) < 2 or len(families) < 2:
+                continue
+            enriched = dict(group)
+            enriched["strong_reports"] = strong_reports
+            enriched["evidence_families"] = sorted(families)
+            enriched["support_score"] = (
+                len(families),
+                len(strong_reports),
+                len(group.get("reports") or []),
+            )
+            supported.append(enriched)
+        supported.sort(key=lambda item: item["support_score"], reverse=True)
+        return supported[: max(1, int(limit))]
+
+    def _assess_mirrored_jury(
+        self,
+        baseline: str,
+        candidate: str,
+        records: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        stable_pairs: list[dict[str, Any]] = []
+        unstable_roles: list[str] = []
+        for jury_role, _instruction in JURY_SPECS:
+            by_orientation = {
+                str(record.get("orientation")): dict(record.get("verdict") or {})
+                for record in records
+                if record.get("jury_role") == jury_role
+            }
+            pair = [by_orientation.get(name) for name, _reverse in JURY_ORIENTATIONS]
+            if (
+                any(not isinstance(verdict, dict) or not verdict for verdict in pair)
+                or not all(_report_is_strong(verdict) for verdict in pair)
+                or not self.runtime.same_speaker(
+                    str(pair[0].get("speaker") or ""),
+                    str(pair[1].get("speaker") or ""),
+                )
+            ):
+                unstable_roles.append(jury_role)
+                continue
+            speaker = str(pair[0].get("speaker") or "")
+            if self.runtime.same_speaker(speaker, candidate):
+                outcome = "candidate"
+            elif self.runtime.same_speaker(speaker, baseline):
+                outcome = "baseline"
+            else:
+                outcome = "other"
+            stable_pairs.append(
+                {
+                    "jury_role": jury_role,
+                    "speaker": speaker,
+                    "outcome": outcome,
+                    "verdicts": pair,
+                }
+            )
+
+        candidate_pairs = [item for item in stable_pairs if item["outcome"] == "candidate"]
+        baseline_pairs = [item for item in stable_pairs if item["outcome"] == "baseline"]
+        other_pairs = [item for item in stable_pairs if item["outcome"] == "other"]
+        return {
+            "candidate": candidate,
+            "stable_pairs": stable_pairs,
+            "unstable_roles": unstable_roles,
+            "candidate_pair_support": len(candidate_pairs),
+            "baseline_pair_support": len(baseline_pairs),
+            "other_pair_support": len(other_pairs),
+            "candidate_reports": [
+                verdict
+                for item in candidate_pairs
+                for verdict in item["verdicts"]
+            ],
+            "passes_general_gate": bool(
+                len(candidate_pairs) >= 3
+                and len(candidate_pairs) > len(baseline_pairs)
+                and not other_pairs
+            ),
+        }
+
+    def _transition_gate(
+        self,
+        *,
+        baseline: str,
+        candidate: str,
+        candidate_group: dict[str, Any],
+        jury_assessment: dict[str, Any],
+        novel_lines: list[str],
+        target_line: int,
+        canonical_note: str,
+        occurrence: dict[str, Any] | None = None,
+    ) -> tuple[bool, str]:
+        pair_support = int(jury_assessment.get("candidate_pair_support") or 0)
+        pair_total = len(JURY_SPECS)
+        if not jury_assessment.get("passes_general_gate"):
+            return False, "mirrored-jury-general-gate-failed"
+
+        baseline_nonperson = self.runtime.same_speaker(
+            baseline, self.runtime.non_person_label
+        )
+        candidate_nonperson = self.runtime.same_speaker(
+            candidate, self.runtime.non_person_label
+        )
+        baseline_generic = bool(
+            not baseline_nonperson and self.runtime.is_generic_speaker(baseline)
+        )
+        candidate_generic = bool(
+            not candidate_nonperson and self.runtime.is_generic_speaker(candidate)
+        )
+        baseline_named = bool(
+            self.runtime.is_valid_speaker(baseline)
+            and not baseline_nonperson
+            and not baseline_generic
+        )
+
+        supporting_reports = list(candidate_group.get("strong_reports") or [])
+        supporting_reports.extend(jury_assessment.get("candidate_reports") or [])
+        citations = {
+            int(value)
+            for report in supporting_reports
+            for value in (report.get("citations") or [])
+            if str(value).isdigit()
+        }
+        directly_bound = _has_local_speaker_binding(
+            candidate,
+            citations,
+            novel_lines,
+            target_line=target_line,
+            occurrence=occurrence,
+        )
+
+        if candidate_nonperson != baseline_nonperson:
+            if pair_support != pair_total:
+                return False, "personhood-change-requires-all-mirrored-juries"
+            if candidate_nonperson:
+                scope_agents = {
+                    str(report.get("agent") or "")
+                    for report in candidate_group.get("strong_reports") or []
+                    if report.get("speaker") == self.runtime.non_person_label
+                    and report.get("quote_type") in NONPERSON_QUOTE_TYPES
+                }
+                if not {"VolumeQuoteScope", "VolumeVoiceBoundary"}.issubset(scope_agents):
+                    return False, "nonperson-change-lacks-two-specialized-boundary-reviews"
+                return True, "all-mirrored-juries-plus-two-nonperson-specialists"
+            if not directly_bound:
+                return False, "person-restoration-lacks-local-speaker-binding"
+            return True, "all-mirrored-juries-plus-local-person-binding"
+
+        if baseline_named and candidate_generic:
+            if pair_support != pair_total:
+                return False, "named-to-generic-requires-all-mirrored-juries"
+            if not directly_bound:
+                return False, "named-to-generic-lacks-direct-contrary-attribution"
+            return True, "all-mirrored-juries-plus-direct-generic-attribution"
+
+        if baseline_generic and not candidate_generic and not candidate_nonperson:
+            families = set(candidate_group.get("evidence_families") or [])
+            if not canonical_note and "identity" not in families and not directly_bound:
+                return False, "generic-to-name-lacks-identity-or-attribution-evidence"
+            return True, "mirrored-jury-plus-naming-specificity-evidence"
+
+        return True, "three-of-four-stable-mirrored-jury-families"
+
+    @staticmethod
+    def _jury_comparison_prompt(
+        *,
+        identity_text: str,
+        packet: str,
+        dialogue_id: str,
+        baseline: str,
+        candidate: str,
+        candidate_rows: list[str],
+        reverse_order: bool,
+    ) -> str:
+        first = candidate if reverse_order else baseline
+        second = baseline if reverse_order else candidate
+        return (
+            identity_text
+            + "\n\n"
+            + packet
+            + f"\n\n[Single target]\n{dialogue_id}; mirrored hypothesis comparison\n"
+            + f"Hypothesis A: {first}\nHypothesis B: {second}\n"
+            + "The A/B order is intentionally mirrored in another independent call. Ignore position, "
+            + "reviewer counts and wording authority. Reconstruct the source evidence and return the actual "
+            + "speaker; you may reject both hypotheses if the raw text proves another label.\n"
+            + "[Independent reviewer evidence]\n"
+            + "\n".join(candidate_rows)
+        )
+
     def _review_system_prompt(self, agent: str, instruction: str) -> str:
         return f"""You are {agent}, one independent reviewer in a generic novel dialogue-speaker system.
 
@@ -1615,7 +2111,7 @@ Mandatory rules:
 
 {instruction}
 
-The provisional label and reviewer reports are fallible evidence, not votes with authority. Reconstruct the raw scene yourself. Reject personality/style guesses and mechanical alternation. Check whether post-quote narration was already consumed by the preceding quote and whether a later attribution covers a block. Explicitly test whether an adjacent quote continues the same speaker or answers the prior speaker; hesitation followed by a self-introduction or missing-information supply is often a cross-speaker repair. Use dynamically supplied verified identities; never invent a person. Preserve every speaker label exactly in the source language and script; never translate or transliterate it. Use {self.runtime.non_person_label} for narration, thought, displayed text, or non-human sound. Return one speaker only through submit_volume_verdict with at least one raw-line citation.
+The two displayed hypotheses and reviewer reports are fallible evidence, not votes with authority. Their order is deliberately reversed in a paired call, so never prefer A, B, the first label or the old label merely because of position. Reconstruct the raw scene yourself. Reject personality/style guesses and mechanical alternation. Check whether post-quote narration was already consumed by the preceding quote and whether a later attribution covers a block. Explicitly test whether an adjacent quote continues the same speaker or answers the prior speaker. First decide whether this is story-world person speech; only then identify the person. Use dynamically supplied verified identities and prefer a proven name over a temporary role, but never invent a person. Preserve every speaker label exactly in the source language and script; never translate or transliterate it. Use {self.runtime.non_person_label} for narration, thought, displayed text, or non-human sound. Return one speaker only through submit_volume_verdict with at least one raw-line citation.
 """
 
     def run(self, dialogue_list: list[tuple[int, str]], *, restart: bool = False) -> dict[str, Any]:
@@ -1641,24 +2137,47 @@ The provisional label and reviewer reports are fallible evidence, not votes with
         occurrences = align_quote_occurrences(novel_lines, dialogue_list)
         vault_data = _load_json(self.vault_path)
         identity_text = _verified_identity_text(vault_data)
-        units = build_review_units(
-            len(dialogue_list),
+        units = build_scene_review_units(
+            novel_lines,
+            dialogue_list,
             focus_size=self.focus_size,
             context_radius=self.context_radius,
+            max_raw_span=self.max_raw_span,
         )
 
         existing = _load_jsonl(self.review_log_path)
         unit_results: dict[tuple[str, str], dict[str, Any]] = {}
-        jury_results: dict[tuple[str, str], dict[str, Any]] = {}
+        jury_results: dict[tuple[str, str, str, str], dict[str, Any]] = {}
         for record in existing:
             if record.get("kind") == "unit" and record.get("status") == "complete":
                 unit_results[(str(record.get("unit_id")), str(record.get("agent")))] = record
             elif record.get("kind") == "jury" and record.get("status") == "complete":
-                jury_results[(str(record.get("dialogue_id")), str(record.get("agent")))] = record
+                jury_results[
+                    (
+                        str(record.get("dialogue_id")),
+                        str(record.get("candidate")),
+                        str(record.get("jury_role")),
+                        str(record.get("orientation")),
+                    )
+                ] = record
 
         assignments_by_id: dict[str, list[dict[str, Any]]] = {
             str(occurrence["id"]): [] for occurrence in occurrences
         }
+        unit_task_total = len(units) * len(REVIEW_AGENT_SPECS)
+        unit_task_initial = sum(
+            (str(unit["unit_id"]), agent) in unit_results
+            for unit in units
+            for agent, _instruction, _include_provisional in REVIEW_AGENT_SPECS
+        )
+        unit_phase_started = time.time()
+        self._emit_progress(
+            "phase_start",
+            phase="scene-review",
+            completed=unit_task_initial,
+            total=unit_task_total,
+            resumed=unit_task_initial,
+        )
         for unit_number, unit in enumerate(units, start=1):
             for agent, instruction, include_provisional in REVIEW_AGENT_SPECS:
                 key = (str(unit["unit_id"]), agent)
@@ -1671,18 +2190,34 @@ The provisional label and reviewer reports are fallible evidence, not votes with
                         unit,
                         include_provisional=include_provisional,
                     )
-                    result = self._call_structured(
-                        agent=agent,
-                        system_prompt=self._review_system_prompt(agent, instruction),
-                        user_content=identity_text + "\n\n" + packet,
-                        tool=ASSIGNMENT_TOOL,
-                        expected_name="submit_volume_assignments",
-                        validator=lambda args, ids=focus_ids, lines=allowed_lines: self._validate_assignments(
-                            args, ids, lines
+                    task_meta = {
+                        "phase": "scene-review",
+                        "kind": "unit",
+                        "unit_id": unit["unit_id"],
+                        "unit_number": unit_number,
+                        "unit_count": len(units),
+                        "agent": agent,
+                    }
+                    result = self._run_resilient_task(
+                        lambda: self._call_structured(
+                            agent=agent,
+                            system_prompt=self._review_system_prompt(agent, instruction),
+                            user_content=identity_text + "\n\n" + packet,
+                            tool=ASSIGNMENT_TOOL,
+                            expected_name="submit_volume_assignments",
+                            validator=lambda args, ids=focus_ids, lines=allowed_lines: self._validate_assignments(
+                                args, ids, lines
+                            ),
+                            record_meta={"kind": "unit", "unit_id": unit["unit_id"]},
+                            required_ids=focus_ids,
+                            allowed_lines=allowed_lines,
                         ),
-                        record_meta={"kind": "unit", "unit_id": unit["unit_id"]},
-                        required_ids=focus_ids,
-                        allowed_lines=allowed_lines,
+                        task_meta=task_meta,
+                        abstain_factory=lambda error: {
+                            "assignments": [],
+                            "abstained": True,
+                            "error": error,
+                        },
                     )
                     record = {
                         "kind": "unit",
@@ -1692,14 +2227,40 @@ The provisional label and reviewer reports are fallible evidence, not votes with
                         "unit_count": len(units),
                         "agent": agent,
                         "assignments": result["assignments"],
+                        "abstained": bool(result.get("abstained")),
+                        "error": result.get("error", ""),
                         "time": time.time(),
                     }
                     _append_jsonl(self.review_log_path, record)
                     unit_results[key] = record
+                    completed = len(unit_results)
+                    elapsed = time.time() - unit_phase_started
+                    completed_here = max(1, completed - unit_task_initial)
+                    eta = elapsed / completed_here * max(0, unit_task_total - completed)
+                    progress = {
+                        "phase": "scene-review",
+                        "status": "running",
+                        "completed": completed,
+                        "total": unit_task_total,
+                        "eta_seconds": eta,
+                        "unit_id": unit["unit_id"],
+                        "unit_number": unit_number,
+                        "unit_count": len(units),
+                        "agent": agent,
+                    }
+                    self._checkpoint_progress(**progress)
+                    self._emit_progress("task_complete", **progress)
                 for assignment in record.get("assignments") or []:
                     item = dict(assignment)
                     item["agent"] = agent
                     assignments_by_id.setdefault(str(item.get("id")), []).append(item)
+
+        self._emit_progress(
+            "phase_complete",
+            phase="scene-review",
+            completed=unit_task_total,
+            total=unit_task_total,
+        )
 
         deterministic_constraints = derive_deterministic_sequence_constraints(
             novel_lines,
@@ -1709,8 +2270,7 @@ The provisional label and reviewer reports are fallible evidence, not votes with
             same_speaker=self.runtime.same_speaker,
         )
 
-        decisions: list[dict[str, Any]] = []
-        reviewed_labels = list(labels)
+        review_plan: dict[str, dict[str, Any]] = {}
         for occurrence in occurrences:
             index = int(occurrence["dialogue_index"])
             dialogue_id = str(occurrence["id"])
@@ -1718,12 +2278,82 @@ The provisional label and reviewer reports are fallible evidence, not votes with
             reports = assignments_by_id.get(dialogue_id, [])
             groups = self._group_reports(reports)
             deterministic = deterministic_constraints.get(dialogue_id)
+            deterministic_selected = ""
+            deterministic_canonical_note = ""
+            deterministic_applicable = False
+            deterministic_blocked_reason = ""
             if deterministic and not self.runtime.same_speaker(
                 str(deterministic["speaker"]), baseline
             ):
-                selected, canonical_note = self.runtime.canonicalize_speaker(
-                    str(deterministic["speaker"])
+                deterministic_selected, deterministic_canonical_note = (
+                    self.runtime.canonicalize_speaker(str(deterministic["speaker"]))
                 )
+                baseline_named = bool(
+                    self.runtime.is_valid_speaker(baseline)
+                    and not self.runtime.same_speaker(
+                        baseline, self.runtime.non_person_label
+                    )
+                    and not self.runtime.is_generic_speaker(baseline)
+                )
+                if baseline_named and self.runtime.is_generic_speaker(
+                    deterministic_selected
+                ):
+                    deterministic_blocked_reason = (
+                        "deterministic-named-to-generic-blocked"
+                    )
+                else:
+                    deterministic_applicable = True
+            review_plan[dialogue_id] = {
+                "occurrence": occurrence,
+                "index": index,
+                "baseline": baseline,
+                "reports": reports,
+                "groups": groups,
+                "alternatives": self._supported_alternative_groups(groups, baseline),
+                "deterministic": deterministic,
+                "deterministic_selected": deterministic_selected,
+                "deterministic_canonical_note": deterministic_canonical_note,
+                "deterministic_applicable": deterministic_applicable,
+                "deterministic_blocked_reason": deterministic_blocked_reason,
+            }
+
+        planned_jury_keys = {
+            (dialogue_id, str(group["speaker"]), jury_role, orientation)
+            for dialogue_id, plan in review_plan.items()
+            if not plan.get("deterministic_applicable")
+            for group in plan["alternatives"]
+            for jury_role, _instruction in JURY_SPECS
+            for orientation, _reverse in JURY_ORIENTATIONS
+        }
+        jury_task_total = len(planned_jury_keys)
+        jury_completed_keys = {
+            key for key in planned_jury_keys if key in jury_results
+        }
+        jury_task_initial = len(jury_completed_keys)
+        jury_phase_started = time.time()
+        self._emit_progress(
+            "phase_start",
+            phase="mirrored-jury",
+            completed=jury_task_initial,
+            total=jury_task_total,
+            resumed=jury_task_initial,
+        )
+
+        decisions: list[dict[str, Any]] = []
+        reviewed_labels = list(labels)
+        for occurrence in occurrences:
+            dialogue_id = str(occurrence["id"])
+            plan = review_plan[dialogue_id]
+            index = int(plan["index"])
+            baseline = str(plan["baseline"])
+            reports = list(plan["reports"])
+            groups = list(plan["groups"])
+            deterministic = plan.get("deterministic")
+            deterministic_blocked_reason = str(
+                plan.get("deterministic_blocked_reason") or ""
+            )
+            if plan.get("deterministic_applicable"):
+                selected = str(plan["deterministic_selected"])
                 reviewed_labels[index] = selected
                 decisions.append(
                     {
@@ -1732,7 +2362,7 @@ The provisional label and reviewer reports are fallible evidence, not votes with
                         "speaker": selected,
                         "changed": True,
                         "source": "deterministic-conversation-repair",
-                        "canonicalization": canonical_note,
+                        "canonicalization": plan["deterministic_canonical_note"],
                         "deterministic_constraint": deterministic,
                         "reviewer_groups": [
                             {"speaker": group["speaker"], "count": len(group["reports"])}
@@ -1741,26 +2371,9 @@ The provisional label and reviewer reports are fallible evidence, not votes with
                     }
                 )
                 continue
-            alternative_group = next(
-                (
-                    group
-                    for group in groups
-                    if not self.runtime.same_speaker(str(group["speaker"]), baseline)
-                    and len(group["reports"]) >= 2
-                    and any(
-                        report.get("confidence") in {"high", "medium"}
-                        and report.get("citations")
-                        and report.get("evidence_basis") not in {"unknown", "inference"}
-                        for report in group["reports"]
-                    )
-                    and any(
-                        report.get("agent") != "VolumeBaselineFalsifier"
-                        for report in group["reports"]
-                    )
-                ),
-                None,
-            )
-            if alternative_group is None:
+
+            alternatives = list(plan["alternatives"])
+            if not alternatives:
                 decisions.append(
                     {
                         "id": dialogue_id,
@@ -1768,6 +2381,7 @@ The provisional label and reviewer reports are fallible evidence, not votes with
                         "speaker": baseline,
                         "changed": False,
                         "source": "no-supported-alternative",
+                        "deterministic_blocked_reason": deterministic_blocked_reason,
                         "reviewer_groups": [
                             {"speaker": group["speaker"], "count": len(group["reports"])}
                             for group in groups
@@ -1776,7 +2390,6 @@ The provisional label and reviewer reports are fallible evidence, not votes with
                 )
                 continue
 
-            candidate = str(alternative_group["speaker"])
             unit = next(
                 item
                 for item in units
@@ -1787,102 +2400,186 @@ The provisional label and reviewer reports are fallible evidence, not votes with
                 occurrences,
                 labels,
                 unit,
-                include_provisional=True,
+                include_provisional=False,
             )
-            candidate_rows = []
-            for report in reports:
-                candidate_rows.append(
-                    f"- {report.get('agent')}: speaker={report.get('speaker')}; "
-                    f"basis={report.get('evidence_basis')}; confidence={report.get('confidence')}; "
-                    f"citations={report.get('citations')}; reason={report.get('reason')}"
-                )
-            jury_prompt = (
-                identity_text
-                + "\n\n"
-                + packet
-                + f"\n\n[Single target]\n{dialogue_id}; provisional={baseline}; "
-                + f"supported alternative={candidate}\n[Independent reviewer reports]\n"
-                + "\n".join(candidate_rows)
-            )
-            verdicts: list[dict[str, Any]] = []
-            for jury_agent, jury_instruction in JURY_SPECS:
-                key = (dialogue_id, jury_agent)
-                record = jury_results.get(key)
-                if record is None:
-                    verdict = self._call_structured(
-                        agent=jury_agent,
-                        system_prompt=self._jury_system_prompt(jury_agent, jury_instruction),
-                        user_content=jury_prompt,
-                        tool=VERDICT_TOOL,
-                        expected_name="submit_volume_verdict",
-                        validator=lambda args, did=dialogue_id, lines=allowed_lines: self._validate_verdict(
-                            args, did, lines
-                        ),
-                        record_meta={"kind": "jury", "dialogue_id": dialogue_id},
-                    )
-                    record = {
-                        "kind": "jury",
-                        "status": "complete",
-                        "dialogue_id": dialogue_id,
-                        "agent": jury_agent,
-                        "verdict": verdict,
-                        "time": time.time(),
-                    }
-                    _append_jsonl(self.review_log_path, record)
-                    jury_results[key] = record
-                verdicts.append(dict(record.get("verdict") or {}))
+            candidate_rows = [
+                f"- {report.get('agent')}: speaker={report.get('speaker')}; "
+                f"basis={report.get('evidence_basis')}; confidence={report.get('confidence')}; "
+                f"citations={report.get('citations')}; reason={report.get('reason')}"
+                for report in reports
+            ]
+            accepted: list[dict[str, Any]] = []
+            assessments: list[dict[str, Any]] = []
+            for alternative_group in alternatives:
+                candidate = str(alternative_group["speaker"])
+                candidate_records: list[dict[str, Any]] = []
+                for jury_role, jury_instruction in JURY_SPECS:
+                    for orientation, reverse_order in JURY_ORIENTATIONS:
+                        key = (dialogue_id, candidate, jury_role, orientation)
+                        record = jury_results.get(key)
+                        if record is None:
+                            jury_agent = f"{jury_role}-{orientation}"
+                            jury_prompt = self._jury_comparison_prompt(
+                                identity_text=identity_text,
+                                packet=packet,
+                                dialogue_id=dialogue_id,
+                                baseline=baseline,
+                                candidate=candidate,
+                                candidate_rows=candidate_rows,
+                                reverse_order=reverse_order,
+                            )
+                            task_meta = {
+                                "phase": "mirrored-jury",
+                                "kind": "jury",
+                                "dialogue_id": dialogue_id,
+                                "candidate": candidate,
+                                "jury_role": jury_role,
+                                "orientation": orientation,
+                                "agent": jury_agent,
+                            }
+                            verdict = self._run_resilient_task(
+                                lambda: self._call_structured(
+                                    agent=jury_agent,
+                                    system_prompt=self._jury_system_prompt(
+                                        jury_agent, jury_instruction
+                                    ),
+                                    user_content=jury_prompt,
+                                    tool=VERDICT_TOOL,
+                                    expected_name="submit_volume_verdict",
+                                    validator=lambda args, did=dialogue_id, lines=allowed_lines: self._validate_verdict(
+                                        args, did, lines
+                                    ),
+                                    record_meta={
+                                        "kind": "jury",
+                                        "dialogue_id": dialogue_id,
+                                        "candidate": candidate,
+                                        "jury_role": jury_role,
+                                        "orientation": orientation,
+                                    },
+                                ),
+                                task_meta=task_meta,
+                                abstain_factory=lambda error: {
+                                    "abstained": True,
+                                    "error": error,
+                                },
+                            )
+                            record = {
+                                "kind": "jury",
+                                "status": "complete",
+                                "dialogue_id": dialogue_id,
+                                "candidate": candidate,
+                                "jury_role": jury_role,
+                                "orientation": orientation,
+                                "agent": jury_agent,
+                                "verdict": (
+                                    {}
+                                    if verdict.get("abstained")
+                                    else verdict
+                                ),
+                                "abstained": bool(verdict.get("abstained")),
+                                "error": verdict.get("error", ""),
+                                "time": time.time(),
+                            }
+                            _append_jsonl(self.review_log_path, record)
+                            jury_results[key] = record
+                            jury_completed_keys.add(key)
+                            completed = len(jury_completed_keys)
+                            elapsed = time.time() - jury_phase_started
+                            completed_here = max(1, completed - jury_task_initial)
+                            eta = elapsed / completed_here * max(0, jury_task_total - completed)
+                            progress = {
+                                "phase": "mirrored-jury",
+                                "status": "running",
+                                "completed": completed,
+                                "total": jury_task_total,
+                                "eta_seconds": eta,
+                                "dialogue_id": dialogue_id,
+                                "candidate": candidate,
+                                "jury_role": jury_role,
+                                "orientation": orientation,
+                            }
+                            self._checkpoint_progress(**progress)
+                            self._emit_progress("task_complete", **progress)
+                        candidate_records.append(record)
 
-            jury_groups = self._group_reports(verdicts)
-            unanimous = jury_groups[0] if jury_groups and len(jury_groups[0]["reports"]) == len(JURY_SPECS) else None
-            jury_evidence_is_strong = bool(
-                unanimous
-                and all(
-                    report.get("confidence") in {"high", "medium"}
-                    and report.get("citations")
-                    and report.get("evidence_basis") not in {"unknown", "inference"}
-                    for report in unanimous["reports"]
+                assessment = self._assess_mirrored_jury(
+                    baseline,
+                    candidate,
+                    candidate_records,
                 )
-            )
-            supported = bool(
-                unanimous
-                and jury_evidence_is_strong
-                and any(
-                    self.runtime.same_speaker(
-                        str(unanimous["speaker"]), str(group["speaker"])
+                canonical_candidate, canonical_note = self.runtime.canonicalize_speaker(candidate)
+                gate_passed, gate_reason = self._transition_gate(
+                    baseline=baseline,
+                    candidate=canonical_candidate,
+                    candidate_group=alternative_group,
+                    jury_assessment=assessment,
+                    novel_lines=novel_lines,
+                    target_line=int(occurrence["line"]),
+                    canonical_note=canonical_note,
+                    occurrence=occurrence,
+                )
+                assessment["canonical_candidate"] = canonical_candidate
+                assessment["canonicalization"] = canonical_note
+                assessment["transition_gate"] = gate_reason
+                assessment["accepted"] = gate_passed
+                assessments.append(assessment)
+                if gate_passed:
+                    accepted.append(
+                        {
+                            "speaker": canonical_candidate,
+                            "canonicalization": canonical_note,
+                            "assessment": assessment,
+                            "review_support": alternative_group.get("support_score"),
+                        }
                     )
-                    and len(group["reports"]) >= 2
-                    for group in groups
+
+            if len(accepted) == 1:
+                winner = accepted[0]
+                selected = str(winner["speaker"])
+                changed = not self.runtime.same_speaker(selected, baseline)
+                if changed:
+                    reviewed_labels[index] = selected
+                source = (
+                    "mirrored-evidence-jury-override"
+                    if changed else "canonicalized-alternative-matches-baseline"
                 )
-            )
-            changed = bool(
-                supported
-                and not self.runtime.same_speaker(str(unanimous["speaker"]), baseline)
-            )
-            selected = str(unanimous["speaker"]) if changed else baseline
-            if changed:
-                selected, canonical_note = self.runtime.canonicalize_speaker(selected)
-                reviewed_labels[index] = selected
+                canonical_note = str(winner["canonicalization"])
             else:
+                selected = baseline
+                changed = False
                 canonical_note = ""
+                source = (
+                    "conflicting-supported-alternatives-retained-baseline"
+                    if len(accepted) > 1
+                    else "mirrored-jury-retained-baseline"
+                )
             decisions.append(
                 {
                     "id": dialogue_id,
                     "baseline": baseline,
                     "speaker": selected,
                     "changed": changed,
-                    "source": "unanimous-independent-volume-jury" if changed else "jury-retained-baseline",
+                    "source": source,
                     "canonicalization": canonical_note,
+                    "deterministic_blocked_reason": deterministic_blocked_reason,
                     "reviewer_groups": [
-                        {"speaker": group["speaker"], "count": len(group["reports"])}
-                        for group in groups
+                        {
+                            "speaker": group["speaker"],
+                            "count": len(group["reports"]),
+                            "families": group.get("evidence_families", []),
+                        }
+                        for group in alternatives
                     ],
-                    "jury_groups": [
-                        {"speaker": group["speaker"], "count": len(group["reports"])}
-                        for group in jury_groups
-                    ],
-                    "jury_evidence_is_strong": jury_evidence_is_strong,
+                    "jury_assessments": assessments,
                 }
             )
+
+        self._emit_progress(
+            "phase_complete",
+            phase="mirrored-jury",
+            completed=jury_task_total,
+            total=jury_task_total,
+        )
 
         output_path = Path(self.labeled_path).with_suffix(".reviewed.tmp")
         with open(output_path, "w", encoding="utf-8") as handle:
@@ -1899,6 +2596,16 @@ The provisional label and reviewer reports are fallible evidence, not votes with
             "units": len(units),
             "review_agents": len(REVIEW_AGENT_SPECS),
             "jury_agents": len(JURY_SPECS),
+            "jury_orientations": len(JURY_ORIENTATIONS),
+            "jury_tasks": jury_task_total,
+            "unit_abstentions": sum(
+                bool(record.get("abstained")) for record in unit_results.values()
+            ),
+            "jury_abstentions": sum(
+                bool(record.get("abstained"))
+                for key, record in jury_results.items()
+                if key in planned_jury_keys
+            ),
             "changed": changed_count,
             "retained": len(dialogue_list) - changed_count,
             "model_calls_this_process": self.model_calls,
@@ -1921,6 +2628,14 @@ The provisional label and reviewer reports are fallible evidence, not votes with
                 "completed_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
                 "final_labeled_sha256": _sha256_file(self.labeled_path),
                 "summary": summary,
+                "progress": {
+                    "phase": "complete",
+                    "status": "complete",
+                    "completed": len(dialogue_list),
+                    "total": len(dialogue_list),
+                    "model_calls_this_process": self.model_calls,
+                    "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                },
             }
         )
         _write_json_atomic(self.state_path, state)

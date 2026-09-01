@@ -281,8 +281,8 @@ class ApiFallbackTests(unittest.TestCase):
         provider = {
             "options": {"baseURL": "https://example.invalid/v1"},
             "models": {
-                run_label.SENSENOVA_MODEL: {
-                    "id": run_label.SENSENOVA_MODEL,
+                "sensenova-6.7-flash-lite": {
+                    "limit": {"context": 262144},
                 }
             },
         }
@@ -300,6 +300,14 @@ class ApiFallbackTests(unittest.TestCase):
         )
         self.assertEqual(keys, [model.api_key for model in models])
         self.assertEqual({"sense-nova"}, {model.round_robin_group for model in models})
+        self.assertEqual(
+            {run_label.SENSENOVA_NATIVE_CONTEXT_LIMIT},
+            {model.native_context_limit for model in models},
+        )
+        self.assertEqual(
+            {run_label.SENSENOVA_MODEL},
+            {model.model for model in models},
+        )
 
         old_models = run_label.API_MODELS
         old_cursor = run_label.API_ROUND_ROBIN_CURSOR
@@ -327,6 +335,26 @@ class ApiFallbackTests(unittest.TestCase):
             ],
             first_models,
         )
+
+    def test_context_limit_uses_native_window_unless_explicitly_overridden(self):
+        model = ApiModel(
+            "sense-nova-1",
+            run_label.SENSENOVA_MODEL,
+            "https://example.invalid/v1",
+            native_context_limit=run_label.SENSENOVA_NATIVE_CONTEXT_LIMIT,
+        )
+        old_limit = run_label.API_CONTEXT_LIMIT
+        try:
+            run_label.API_CONTEXT_LIMIT = 0
+            self.assertEqual(
+                run_label.SENSENOVA_NATIVE_CONTEXT_LIMIT,
+                run_label._model_context_limit(model),
+            )
+
+            run_label.API_CONTEXT_LIMIT = 40000
+            self.assertEqual(40000, run_label._model_context_limit(model))
+        finally:
+            run_label.API_CONTEXT_LIMIT = old_limit
 
     def test_round_robin_timeout_fails_over_instead_of_retrying_same_key(self):
         pooled = ApiModel(
