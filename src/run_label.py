@@ -25,6 +25,7 @@ import ast
 import requests
 import argparse
 import time
+import threading
 import traceback
 from collections import Counter
 from datetime import datetime
@@ -81,14 +82,21 @@ MAX_TOOL_ROUNDS = 10
 MODEL_PROVIDER = "ollama"
 API_MODEL_FILTER = ""
 API_MODEL_PRIORITY = []
-API_CONTEXT_LIMIT = 40000
-API_MAX_OUTPUT_TOKENS = 4096
+# Zero means "use the selected model's native context window". A positive
+# value is an explicit experiment override, for example 40000 for a later
+# qwen3:32b compatibility run.
+API_CONTEXT_LIMIT = 0
+API_MAX_OUTPUT_TOKENS = 16384
 API_RETRIES = 3
 API_RETRY_DELAY = 5.0
 API_CALL_TRACE = []
 CURRENT_ROUND_TRACE = None
 API_ROUND_ROBIN_CURSOR = {}
-SENSENOVA_MODEL = "sensenova-6.7-flash-lite"
+SENSENOVA_MODEL = (
+    os.environ.get("SENSENOVA_MODEL", "sensenova-6.8-flash-lite").strip()
+    or "sensenova-6.8-flash-lite"
+)
+SENSENOVA_NATIVE_CONTEXT_LIMIT = 262144
 SENSENOVA_KEYS_PATH = os.path.join(ROOT_DIR, "config", "other_sensenova_apikeys")
 DECISION_MODE = os.environ.get("NOVEL_DECISION_MODE", "quality").strip().lower()
 
@@ -113,10 +121,13 @@ QUALITY_SCENE_RADIUS = _env_int("NOVEL_QUALITY_SCENE_RADIUS", 12)
 QUALITY_AUDIT_RETRIES = max(1, _env_int("NOVEL_QUALITY_AUDIT_RETRIES", 2))
 SCENE_MAX_TURNS = max(4, _env_int("NOVEL_SCENE_MAX_TURNS", 6))
 SCENE_MAX_RAW_SPAN = max(30, _env_int("NOVEL_SCENE_MAX_RAW_SPAN", 180))
-SCENE_DEEP_TOOL_ROUNDS = max(1, _env_int("NOVEL_SCENE_DEEP_TOOL_ROUNDS", 8))
-SCENE_DEEP_TOKEN_BUDGET = max(8000, _env_int("NOVEL_SCENE_DEEP_TOKEN_BUDGET", 60000))
+SCENE_DEEP_TOOL_ROUNDS = max(1, _env_int("NOVEL_SCENE_DEEP_TOOL_ROUNDS", 12))
+SCENE_DEEP_TOKEN_BUDGET = max(8000, _env_int("NOVEL_SCENE_DEEP_TOKEN_BUDGET", 200000))
 VOLUME_REVIEW_FOCUS_SIZE = max(1, _env_int("NOVEL_VOLUME_REVIEW_FOCUS_SIZE", 8))
 VOLUME_REVIEW_CONTEXT_RADIUS = max(1, _env_int("NOVEL_VOLUME_REVIEW_CONTEXT_RADIUS", 5))
+VOLUME_REVIEW_TASK_RETRIES = max(1, _env_int("NOVEL_VOLUME_REVIEW_TASK_RETRIES", 5))
+VOLUME_REVIEW_RETRY_DELAY = max(0.0, _env_float("NOVEL_VOLUME_REVIEW_RETRY_DELAY", 15.0))
+VOLUME_REVIEW_HEARTBEAT = max(0, _env_int("NOVEL_VOLUME_REVIEW_HEARTBEAT", 30))
 
 
 def _resolve_workspace_path(path_value):
@@ -176,7 +187,7 @@ class ModelCallError(RuntimeError):
 class ApiModel:
     def __init__(self, name, model, base_url, api_key="", min_interval=1.5,
                  tool_capable=True, display_model=None, use_env_proxy=True,
-                 round_robin_group=""):
+                 round_robin_group="", native_context_limit=0):
         self.name = name
         self.model = model
         self.display_model = display_model or model
@@ -190,6 +201,7 @@ class ApiModel:
         self.last_error = ""
         self.disabled = False
         self.round_robin_group = round_robin_group
+        self.native_context_limit = max(0, int(native_context_limit or 0))
 
     @property
     def label(self):
@@ -223,6 +235,24 @@ class ApiModel:
 
 
 API_MODELS = []
+
+
+def _model_context_limit(model=None):
+    """Return the active request window; zero means no client-side ceiling."""
+    if API_CONTEXT_LIMIT > 0:
+        return API_CONTEXT_LIMIT
+    if model is not None and model.native_context_limit > 0:
+        return model.native_context_limit
+    native_limits = [
+        item.native_context_limit
+        for item in API_MODELS
+        if item.native_context_limit > 0
+    ]
+    if native_limits:
+        return min(native_limits)
+    if MODEL_PROVIDER == "api-fallback" and "sense" in API_MODEL_FILTER.lower():
+        return SENSENOVA_NATIVE_CONTEXT_LIMIT
+    return 0
 
 
 def _load_opencode_provider(provider_name):
@@ -321,11 +351,28 @@ def _append_sensenova_models(models):
     opts = provider.get("options", {}) or {}
     configured_models = provider.get("models", {}) or {}
     base_url = opts.get("baseURL", "") or opts.get("baseUrl", "") or opts.get("base_url", "")
-    if SENSENOVA_MODEL not in configured_models or not base_url:
+    if not base_url:
         return
 
-    model_conf = configured_models.get(SENSENOVA_MODEL) or {}
+    # Older opencode configs may still list the previous public alias. The API
+    # accepts the current model id, so reuse its endpoint configuration.
+    configured_name = SENSENOVA_MODEL
+    if configured_name not in configured_models:
+        configured_name = next(
+            (
+                name for name in configured_models
+                if str(name).lower().startswith("sensenova-")
+                and str(name).lower().endswith("-flash-lite")
+            ),
+            SENSENOVA_MODEL,
+        )
+    model_conf = configured_models.get(configured_name) or {}
     actual_model = model_conf.get("id") or SENSENOVA_MODEL
+    configured_limit = (model_conf.get("limit") or {}).get("context")
+    try:
+        native_context_limit = max(SENSENOVA_NATIVE_CONTEXT_LIMIT, int(configured_limit))
+    except (TypeError, ValueError):
+        native_context_limit = SENSENOVA_NATIVE_CONTEXT_LIMIT
     use_env_proxy = os.environ.get("SENSENOVA_USE_ENV_PROXY", "").strip().lower() in {"1", "true", "yes", "on"}
     file_keys = _load_sensenova_keys()
     if file_keys:
@@ -341,6 +388,7 @@ def _append_sensenova_models(models):
                 display_model=f"{SENSENOVA_MODEL}-{suffix}",
                 use_env_proxy=use_env_proxy,
                 round_robin_group="sense-nova",
+                native_context_limit=native_context_limit,
             ))
         return
 
@@ -349,7 +397,8 @@ def _append_sensenova_models(models):
         models.append(ApiModel("sense-nova", actual_model, base_url, api_key,
                                min_interval=1.5, tool_capable=True,
                                display_model=SENSENOVA_MODEL,
-                               use_env_proxy=use_env_proxy))
+                               use_env_proxy=use_env_proxy,
+                               native_context_limit=native_context_limit))
 
 
 def _model_matches_priority(model, priority_item):
@@ -423,7 +472,7 @@ def _build_api_models():
     models = []
 
     # Priority is intentional, not random. Keep low-context models such as
-    # GLM-4V-Flash (16K) out of this pool because experiments target 40K.
+    # GLM-4V-Flash (16K) out of the high-context quality pool.
     _append_sensenova_models(models)
 
     longcat_provider = _load_opencode_provider("longcat")
@@ -510,9 +559,10 @@ def _openai_messages(messages):
 
 def _api_chat(model, messages, tools=None, tool_choice="auto", request_timeout=300):
     estimated_tokens = _estimate_message_tokens(messages)
-    if estimated_tokens + API_MAX_OUTPUT_TOKENS > API_CONTEXT_LIMIT:
+    context_limit = _model_context_limit(model)
+    if context_limit and estimated_tokens + API_MAX_OUTPUT_TOKENS > context_limit:
         raise ModelCallError(
-            f"context budget exceeded: estimated {estimated_tokens + API_MAX_OUTPUT_TOKENS} > {API_CONTEXT_LIMIT}"
+            f"context budget exceeded: estimated {estimated_tokens + API_MAX_OUTPUT_TOKENS} > {context_limit}"
         )
     model.wait_for_slot()
     headers = {"Content-Type": "application/json"}
@@ -970,7 +1020,7 @@ def _call_api_fallback_once(
                     tool_choice=effective_tool_choice,
                     attempt=attempt,
                     max_attempts=max_attempts,
-                    api_context_limit=API_CONTEXT_LIMIT,
+                    api_context_limit=_model_context_limit(model),
                     request_timeout=effective_timeout,
                     **_message_trace_summary(messages),
                 )
@@ -4294,7 +4344,7 @@ class Boss:
             retries=QUALITY_AUDIT_RETRIES,
             deep_tool_rounds=SCENE_DEEP_TOOL_ROUNDS,
             deep_token_budget=SCENE_DEEP_TOKEN_BUDGET,
-            context_limit=API_CONTEXT_LIMIT,
+            context_limit=_model_context_limit() or SENSENOVA_NATIVE_CONTEXT_LIMIT,
             max_output_tokens=API_MAX_OUTPUT_TOKENS,
         )
         self.scene_quality = SceneSequenceAudit(
@@ -5158,7 +5208,7 @@ def validate(error_limit=30):
 
 def _writeline(msg):
     """Write status line during annotation."""
-    print(msg)
+    print(msg, flush=True)
 
 
 def run_volume_second_pass(dialogues, *, restart=False):
@@ -5187,15 +5237,103 @@ def run_volume_second_pass(dialogues, *, restart=False):
             return True
         return QualityAudit._same_speaker(left_clean, right_clean)
 
+    def format_review_duration(seconds):
+        seconds = max(0, int(seconds or 0))
+        hours, remainder = divmod(seconds, 3600)
+        minutes, secs = divmod(remainder, 60)
+        if hours:
+            return f"{hours}h{minutes:02d}m"
+        return f"{minutes}m{secs:02d}s"
+
+    def review_progress(record):
+        event = record.get("event")
+        phase = str(record.get("phase") or "review")
+        if event == "phase_start":
+            completed = int(record.get("completed") or 0)
+            total = int(record.get("total") or 0)
+            _writeline(
+                f"  [Review {phase}] starting: {completed}/{total} durable tasks complete"
+            )
+            return
+        if event == "task_complete":
+            completed = int(record.get("completed") or 0)
+            total = int(record.get("total") or 0)
+            percent = 100.0 if total <= 0 else completed * 100.0 / total
+            eta = format_review_duration(record.get("eta_seconds") or 0)
+            detail = str(
+                record.get("unit_id")
+                or record.get("dialogue_id")
+                or record.get("candidate")
+                or ""
+            )
+            actor = str(record.get("agent") or record.get("jury_role") or "")
+            _writeline(
+                f"  [Review {phase} {completed}/{total} {percent:5.1f}%] "
+                f"{detail} {actor} | calls={record.get('model_calls', 0)} ETA={eta}"
+            )
+            return
+        if event == "task_retry_wait":
+            _writeline(
+                f"  [Review retry {record.get('task_attempt')}/{record.get('task_attempts')}] "
+                f"{record.get('agent') or record.get('dialogue_id') or phase}; "
+                f"waiting {record.get('wait_seconds', 0):.0f}s: {str(record.get('error') or '')[:180]}"
+            )
+            return
+        if event == "task_exhausted":
+            _writeline(
+                f"  [Review failed] {record.get('agent') or record.get('dialogue_id') or phase}: "
+                f"{str(record.get('error') or '')[:240]}"
+            )
+            return
+        if event == "task_abstained":
+            _writeline(
+                f"  [Review abstain] {record.get('agent') or record.get('dialogue_id') or phase}; "
+                f"baseline will be protected: {str(record.get('error') or '')[:220]}"
+            )
+            return
+        if event == "phase_complete":
+            _writeline(
+                f"  [Review {phase}] complete: {record.get('completed', 0)}/{record.get('total', 0)}"
+            )
+
+    def call_review_model(messages, **kwargs):
+        label = str(kwargs.get("label") or "volume-review")
+        started = time.time()
+        stop = threading.Event()
+        heartbeat = None
+        if VOLUME_REVIEW_HEARTBEAT > 0:
+            def report_heartbeat():
+                while not stop.wait(VOLUME_REVIEW_HEARTBEAT):
+                    _writeline(
+                        f"  [Review active] {label} still running | "
+                        f"elapsed={format_review_duration(time.time() - started)}"
+                    )
+
+            heartbeat = threading.Thread(
+                target=report_heartbeat,
+                name="volume-review-heartbeat",
+                daemon=True,
+            )
+            heartbeat.start()
+        try:
+            return call_ollama(messages, **kwargs)
+        finally:
+            stop.set()
+            if heartbeat is not None:
+                heartbeat.join(timeout=1.0)
+
     runtime = VolumeReviewRuntime(
-        call_model=call_ollama,
+        call_model=call_review_model,
         parse_tool_arguments=parse_tool_arguments,
         validate_speaker=validate_char_name,
         is_valid_speaker=is_valid_final_speaker,
         same_speaker=same_with_verified_alias,
         canonicalize_speaker=canonicalize,
+        is_generic_speaker=is_generic_speaker_label,
         request_timeout=QUALITY_REQUEST_TIMEOUT,
         retries=max(8, QUALITY_AUDIT_RETRIES),
+        task_retries=VOLUME_REVIEW_TASK_RETRIES,
+        task_retry_delay=VOLUME_REVIEW_RETRY_DELAY,
         non_person_label=NON_PERSON_LABEL,
     )
     reviewer = VolumeSecondPassReviewer(
@@ -5209,6 +5347,8 @@ def run_volume_second_pass(dialogues, *, restart=False):
         first_pass_path=FIRST_PASS_LABELED_PATH,
         focus_size=VOLUME_REVIEW_FOCUS_SIZE,
         context_radius=VOLUME_REVIEW_CONTEXT_RADIUS,
+        max_raw_span=SCENE_MAX_RAW_SPAN,
+        progress_callback=review_progress,
     )
     _writeline("\n  Starting resumable full-volume second-pass review...")
     result = reviewer.run(dialogues, restart=restart)
@@ -5228,11 +5368,13 @@ def run_volume_second_pass(dialogues, *, restart=False):
 
 def main():
     global API_MODEL_FILTER, API_MODEL_PRIORITY, MODEL_PROVIDER, API_RETRIES, API_RETRY_DELAY
+    global API_CONTEXT_LIMIT
     global DECISION_MODE, DIALOGUE_BLOCK_RADIUS, QUALITY_REQUEST_TIMEOUT
     global QUALITY_SCENE_RADIUS, QUALITY_AUDIT_RETRIES
     global SCENE_MAX_TURNS, SCENE_MAX_RAW_SPAN
     global SCENE_DEEP_TOOL_ROUNDS, SCENE_DEEP_TOKEN_BUDGET
     global VOLUME_REVIEW_FOCUS_SIZE, VOLUME_REVIEW_CONTEXT_RADIUS
+    global VOLUME_REVIEW_TASK_RETRIES, VOLUME_REVIEW_RETRY_DELAY, VOLUME_REVIEW_HEARTBEAT
     parser = argparse.ArgumentParser(description="Multi-agent novel dialogue speaker annotation v4")
     parser.add_argument("--start", type=int, default=0, help="Start from dialogue index (0=resume)")
     parser.add_argument("--count", type=int, default=1, help="Number of dialogues to annotate")
@@ -5277,6 +5419,24 @@ def main():
         default=VOLUME_REVIEW_CONTEXT_RADIUS,
         help="Overlapping context dialogues on each side of a review focus block",
     )
+    parser.add_argument(
+        "--volume-review-task-retries",
+        type=int,
+        default=VOLUME_REVIEW_TASK_RETRIES,
+        help="Durable task-level retries after structured review recovery is exhausted",
+    )
+    parser.add_argument(
+        "--volume-review-retry-delay",
+        type=float,
+        default=VOLUME_REVIEW_RETRY_DELAY,
+        help="Base seconds for exponential full-volume review task retry delay",
+    )
+    parser.add_argument(
+        "--volume-review-heartbeat",
+        type=int,
+        default=VOLUME_REVIEW_HEARTBEAT,
+        help="Seconds between active-call heartbeat lines during full-volume review; 0 disables",
+    )
     parser.add_argument("--validate", action="store_true", help="Run validation after annotation")
     parser.add_argument("--error-limit", type=int, default=_env_int("NOVEL_VALIDATE_ERROR_LIMIT", 30),
                         help="Validation error rows to print; 0 means all")
@@ -5311,6 +5471,12 @@ def main():
                         help="Attempts per API model for transient errors and missing required tool calls")
     parser.add_argument("--api-retry-delay", type=float, default=_env_float("NOVEL_API_RETRY_DELAY", API_RETRY_DELAY),
                         help="Base seconds for exponential retry delay")
+    parser.add_argument(
+        "--api-context-limit",
+        type=int,
+        default=_env_int("NOVEL_API_CONTEXT_LIMIT", API_CONTEXT_LIMIT),
+        help="Optional client-side context ceiling; 0 uses each model's native window",
+    )
     args = parser.parse_args()
     configure_paths(
         data_dir=args.data_dir,
@@ -5326,6 +5492,7 @@ def main():
     API_MODEL_PRIORITY = [item.strip() for item in args.api_priority.split(",") if item.strip()]
     API_RETRIES = max(1, args.api_retries)
     API_RETRY_DELAY = max(0.0, args.api_retry_delay)
+    API_CONTEXT_LIMIT = max(0, args.api_context_limit)
     DECISION_MODE = args.decision_mode
     DIALOGUE_BLOCK_RADIUS = max(1, args.dialogue_block_radius)
     QUALITY_REQUEST_TIMEOUT = max(1, args.quality_request_timeout)
@@ -5337,6 +5504,9 @@ def main():
     SCENE_DEEP_TOKEN_BUDGET = max(8000, args.scene_deep_token_budget)
     VOLUME_REVIEW_FOCUS_SIZE = max(1, args.volume_review_focus_size)
     VOLUME_REVIEW_CONTEXT_RADIUS = max(1, args.volume_review_context_radius)
+    VOLUME_REVIEW_TASK_RETRIES = max(1, args.volume_review_task_retries)
+    VOLUME_REVIEW_RETRY_DELAY = max(0.0, args.volume_review_retry_delay)
+    VOLUME_REVIEW_HEARTBEAT = max(0, args.volume_review_heartbeat)
     if DECISION_MODE in {"quality", "quality-v1"} and MODEL_PROVIDER == "api-fallback":
         if not API_MODEL_FILTER:
             API_MODEL_FILTER = "sense-nova"
@@ -5354,7 +5524,11 @@ def main():
         print(f"  Model: {OLLAMA_MODEL}")
         print(f"  Server: {OLLAMA_BASE_URL}")
     else:
-        print(f"  API context limit: {API_CONTEXT_LIMIT}")
+        print(f"  SenseNova native context: {SENSENOVA_NATIVE_CONTEXT_LIMIT} tokens (256K)")
+        if API_CONTEXT_LIMIT:
+            print(f"  API context override: {API_CONTEXT_LIMIT} tokens")
+        else:
+            print("  API context policy: provider-native (no shared 40K ceiling)")
         print(f"  API max output tokens: {API_MAX_OUTPUT_TOKENS}")
         if API_MODEL_FILTER:
             print(f"  API model filter: {API_MODEL_FILTER}")
@@ -5374,6 +5548,13 @@ def main():
             f"{args.volume_review} ({VOLUME_REVIEW_FOCUS_SIZE} focus / "
             f"{VOLUME_REVIEW_CONTEXT_RADIUS} context turns)"
         )
+        print(
+            "  Full-volume review resilience: "
+            f"{VOLUME_REVIEW_TASK_RETRIES} task retries / "
+            f"{VOLUME_REVIEW_RETRY_DELAY:g}s base delay / "
+            f"{VOLUME_REVIEW_HEARTBEAT}s heartbeat"
+        )
+        print("  Full-volume review panel: 9 scene maps / 4 mirrored jury roles x 2 orders")
     elif DECISION_MODE == "quality-v1":
         print(f"  Archived quality-v1 scene radius: {QUALITY_SCENE_RADIUS} turns per side")
         print(f"  Quality audit retries: {QUALITY_AUDIT_RETRIES}")
