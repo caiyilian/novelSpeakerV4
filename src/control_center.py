@@ -189,7 +189,7 @@ class VolumeProcess(QObject):
         self._output_line_buffer = ""
         self.latest_progress_hint = None
         self.run_started_at = time.monotonic()
-        self.run_start_labeled = read_progress(self.spec).labeled
+        self.run_start_labeled = 0 if reset else read_progress(self.spec).labeled
 
         environment = QProcessEnvironment.systemEnvironment()
         for name, value in build_process_environment(key_file).items():
@@ -876,14 +876,25 @@ class ControlCenter(QMainWindow):
         review = read_review_progress(spec)
 
         if controller and controller.running and progress.complete and review and review.active:
+            hint = controller.latest_progress_hint
+            review_completed = review.completed
+            review_total = review.total
+            if (
+                review_total <= 0
+                and hint is not None
+                and hint.phase != "first-pass"
+            ):
+                review_completed = hint.completed
+                review_total = hint.total
             row.update_progress(
-                review.completed,
-                review.total,
-                review.percent,
+                review_completed,
+                review_total,
+                0
+                if review_total <= 0
+                else min(100, round(review_completed * 100 / review_total)),
                 stage="复审",
             )
             eta = review.eta_seconds
-            hint = controller.latest_progress_hint
             if eta is None and hint is not None and hint.phase != "first-pass":
                 eta = hint.eta_seconds
             row.set_eta(review.phase_label, eta)
