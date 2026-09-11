@@ -96,8 +96,14 @@ SENSENOVA_MODEL = (
     os.environ.get("SENSENOVA_MODEL", "sensenova-6.8-flash-lite").strip()
     or "sensenova-6.8-flash-lite"
 )
+SENSENOVA_DIRECT_BASE_URL = "https://token.sensenova.cn"
 SENSENOVA_NATIVE_CONTEXT_LIMIT = 262144
 SENSENOVA_KEYS_PATH = os.path.join(ROOT_DIR, "config", "other_sensenova_apikeys")
+AGNES_MODELS = (
+    "agnes-2.0-flash",
+    "agnes-2.5-flash",
+    "agnes-3.0-flash",
+)
 DECISION_MODE = os.environ.get("NOVEL_DECISION_MODE", "quality").strip().lower()
 
 
@@ -344,15 +350,14 @@ def _suffix_name(index):
 
 
 def _append_sensenova_models(models):
-    provider = _load_opencode_provider("sense-nova")
-    if not provider:
-        return
-
+    provider = _load_opencode_provider("sense-nova") or {}
     opts = provider.get("options", {}) or {}
     configured_models = provider.get("models", {}) or {}
-    base_url = opts.get("baseURL", "") or opts.get("baseUrl", "") or opts.get("base_url", "")
-    if not base_url:
-        return
+    configured_base_url = (
+        opts.get("baseURL", "")
+        or opts.get("baseUrl", "")
+        or opts.get("base_url", "")
+    )
 
     # Older opencode configs may still list the previous public alias. The API
     # accepts the current model id, so reuse its endpoint configuration.
@@ -376,6 +381,11 @@ def _append_sensenova_models(models):
     use_env_proxy = os.environ.get("SENSENOVA_USE_ENV_PROXY", "").strip().lower() in {"1", "true", "yes", "on"}
     file_keys = _load_sensenova_keys()
     if file_keys:
+        base_url = (
+            os.environ.get("SENSENOVA_BASE_URL", "").strip()
+            or configured_base_url
+            or SENSENOVA_DIRECT_BASE_URL
+        )
         for index, api_key in enumerate(file_keys):
             suffix = _suffix_name(index)
             models.append(ApiModel(
@@ -392,9 +402,11 @@ def _append_sensenova_models(models):
             ))
         return
 
+    if not configured_base_url:
+        return
     api_key = opts.get("apiKey", "") or opts.get("api_key", "")
     if api_key:
-        models.append(ApiModel("sense-nova", actual_model, base_url, api_key,
+        models.append(ApiModel("sense-nova", actual_model, configured_base_url, api_key,
                                min_interval=1.5, tool_capable=True,
                                display_model=SENSENOVA_MODEL,
                                use_env_proxy=use_env_proxy,
@@ -486,8 +498,21 @@ def _build_api_models():
 
     agnes_key = _load_agnes_key()
     if agnes_key:
-        models.append(ApiModel("agnes", "agnes-2.0-flash", "https://apihub.agnes-ai.com/v1",
-                               agnes_key, min_interval=1.5, tool_capable=True))
+        agnes_use_env_proxy = os.environ.get(
+            "AGNES_USE_ENV_PROXY",
+            "",
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        for agnes_model in AGNES_MODELS:
+            models.append(ApiModel(
+                agnes_model,
+                agnes_model,
+                "https://apihub.agnes-ai.com/v1",
+                agnes_key,
+                min_interval=2.0,
+                tool_capable=True,
+                use_env_proxy=agnes_use_env_proxy,
+                round_robin_group="agnes",
+            ))
 
     zhipu_key = _load_zhipu_key()
     if zhipu_key:
@@ -508,18 +533,29 @@ def _build_api_models():
     _append_opencode_model(models, "lan-189", "deepseek-v4-flash-free-189", min_interval=2.0)
 
     if API_MODEL_FILTER:
-        lowered = API_MODEL_FILTER.lower()
-        exact_models = [
-            model for model in models
-            if lowered == model.label.lower() or lowered == model.model.lower() or lowered == model.name.lower()
+        filters = [
+            item.strip().lower()
+            for item in re.split(r"[,;]", API_MODEL_FILTER)
+            if item.strip()
         ]
-        if exact_models:
-            models = exact_models
-        else:
-            models = [
+        selected = []
+        for item in filters:
+            exact_models = [
                 model for model in models
-                if lowered in model.label.lower() or lowered in model.model.lower() or lowered in model.name.lower()
+                if item == model.label.lower()
+                or item == model.model.lower()
+                or item == model.name.lower()
             ]
+            matches = exact_models or [
+                model for model in models
+                if item in model.label.lower()
+                or item in model.model.lower()
+                or item in model.name.lower()
+            ]
+            for model in matches:
+                if model not in selected:
+                    selected.append(model)
+        models = selected
     models = _apply_api_priority(models)
     return models
 
@@ -637,13 +673,21 @@ def init_api_fallback(health_check="all"):
     API_MODELS = _build_api_models()
     API_ROUND_ROBIN_CURSOR = {}
     if not API_MODELS:
-        raise ModelCallError("No API fallback models configured. Set ZHIPUAI_API_KEY or configure opencode providers.")
+        raise ModelCallError(
+            "No API fallback models configured. Add SenseNova keys, set ZHIPUAI_API_KEY, "
+            "or configure opencode providers."
+        )
 
     sensenova_pool_size = sum(
         model.round_robin_group == "sense-nova" for model in API_MODELS
     )
     if sensenova_pool_size:
         print(f"  SenseNova round-robin pool: {sensenova_pool_size} keys")
+    agnes_pool_size = sum(
+        model.round_robin_group == "agnes" for model in API_MODELS
+    )
+    if agnes_pool_size:
+        print(f"  Agnes fallback pool: {agnes_pool_size} models")
 
     if health_check == "none":
         print("  API fallback health check: skipped")
@@ -1006,7 +1050,11 @@ def _call_api_fallback_once(
         for attempt in range(1, max_attempts + 1):
             try:
                 effective_tool_choice = tool_choice
-                if prompt_requires_read and tool_choice == "auto" and model.name != "agnes":
+                if (
+                    prompt_requires_read
+                    and tool_choice == "auto"
+                    and not model.name.startswith("agnes")
+                ):
                     effective_tool_choice = {"type": "function", "function": {"name": "read_novel_lines"}}
                 temp_log_event(
                     "model_call_start",
@@ -1240,6 +1288,22 @@ def call_api_fallback(
         except ModelCallError as exc:
             recovery = _api_pool_recovery_state(needs_tools)
             if recovery is None:
+                ready_models = [
+                    model.name for model in API_MODELS
+                    if model.available(needs_tools)
+                ]
+                if ready_models and _is_transient_api_pool_error(str(exc)):
+                    # A cooldown can expire between the final availability scan in
+                    # _call_api_fallback_once() and this recovery check. Retry the
+                    # newly available member instead of leaking a transient 429.
+                    temp_log_event(
+                        "model_pool_ready_retry",
+                        label=label,
+                        tools_enabled=needs_tools,
+                        providers=ready_models,
+                        original_error=str(exc)[:1000],
+                    )
+                    continue
                 raise
 
             delay = recovery["delay"]
@@ -5510,8 +5574,11 @@ def main():
     if DECISION_MODE in {"quality", "quality-v1"} and MODEL_PROVIDER == "api-fallback":
         if not API_MODEL_FILTER:
             API_MODEL_FILTER = "sense-nova"
-        elif "sense" not in API_MODEL_FILTER.lower():
-            parser.error("quality decision mode currently permits SenseNova API models only")
+        elif not any(
+            family in API_MODEL_FILTER.lower()
+            for family in ("sense", "agnes")
+        ):
+            parser.error("quality decision mode currently permits SenseNova and Agnes API models only")
 
     print("=" * 60)
     print("  Multi-agent Novel Dialogue Speaker Annotation v4")

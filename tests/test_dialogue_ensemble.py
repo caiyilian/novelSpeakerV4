@@ -336,6 +336,97 @@ class ApiFallbackTests(unittest.TestCase):
             first_models,
         )
 
+    def test_sensenova_key_file_does_not_require_opencode_provider(self):
+        models = []
+        with patch.object(
+            run_label,
+            "_load_opencode_provider",
+            return_value=None,
+        ), patch.object(
+            run_label,
+            "_load_sensenova_keys",
+            return_value=["key-1", "key-2"],
+        ), patch.dict(run_label.os.environ, {"SENSENOVA_BASE_URL": ""}):
+            run_label._append_sensenova_models(models)
+
+        self.assertEqual(["sense-nova-1", "sense-nova-2"], [model.name for model in models])
+        self.assertEqual(
+            {run_label.SENSENOVA_DIRECT_BASE_URL},
+            {model.base_url for model in models},
+        )
+
+    def test_combined_quality_filter_keeps_sensenova_then_all_agnes_models(self):
+        old_filter = run_label.API_MODEL_FILTER
+        run_label.API_MODEL_FILTER = "sense-nova,agnes"
+        try:
+            with patch.object(
+                run_label,
+                "_load_opencode_provider",
+                return_value=None,
+            ), patch.object(
+                run_label,
+                "_load_sensenova_keys",
+                return_value=["sense-key"],
+            ), patch.object(
+                run_label,
+                "_load_agnes_key",
+                return_value="agnes-key",
+            ), patch.object(
+                run_label,
+                "_load_zhipu_key",
+                return_value="",
+            ):
+                models = run_label._build_api_models()
+        finally:
+            run_label.API_MODEL_FILTER = old_filter
+
+        self.assertEqual(
+            ["sense-nova-1", *run_label.AGNES_MODELS],
+            [model.name for model in models],
+        )
+        self.assertEqual(
+            {"agnes"},
+            {model.round_robin_group for model in models[1:]},
+        )
+
+    def test_combined_quality_filter_keeps_sensenova_then_all_agnes_models(self):
+        provider = {
+            "options": {"baseURL": "https://example.invalid/v1"},
+            "models": {run_label.SENSENOVA_MODEL: {}},
+        }
+        old_filter = run_label.API_MODEL_FILTER
+        run_label.API_MODEL_FILTER = "sense-nova,agnes"
+        try:
+            with patch.object(
+                run_label,
+                "_load_opencode_provider",
+                side_effect=lambda name: provider if name == "sense-nova" else None,
+            ), patch.object(
+                run_label,
+                "_load_sensenova_keys",
+                return_value=["sense-key"],
+            ), patch.object(
+                run_label,
+                "_load_agnes_key",
+                return_value="agnes-key",
+            ), patch.object(
+                run_label,
+                "_load_zhipu_key",
+                return_value="",
+            ):
+                models = run_label._build_api_models()
+        finally:
+            run_label.API_MODEL_FILTER = old_filter
+
+        self.assertEqual(
+            ["sense-nova-1", *run_label.AGNES_MODELS],
+            [model.name for model in models],
+        )
+        self.assertEqual(
+            ["sense-nova", "agnes", "agnes", "agnes"],
+            [model.round_robin_group for model in models],
+        )
+
     def test_context_limit_uses_native_window_unless_explicitly_overridden(self):
         model = ApiModel(
             "sense-nova-1",
@@ -414,6 +505,50 @@ class ApiFallbackTests(unittest.TestCase):
         self.assertEqual(("OK", 1, 1, []), result)
         self.assertEqual(2, call_once.call_count)
         sleep.assert_called_once()
+
+    def test_transient_pool_retries_member_that_just_left_cooldown(self):
+        ready = ApiModel(
+            "sense-nova-1",
+            "model",
+            "https://example.invalid",
+            "key-1",
+            round_robin_group="sense-nova",
+        )
+        ready.last_error = "HTTP 429 rate limited"
+        cooling = ApiModel(
+            "sense-nova-2",
+            "model",
+            "https://example.invalid",
+            "key-2",
+            round_robin_group="sense-nova",
+        )
+        cooling.mark_failure("HTTP 429 rate limited", cooldown=30)
+        old_models = run_label.API_MODELS
+        run_label.API_MODELS = [ready, cooling]
+
+        try:
+            with patch.object(
+                run_label,
+                "_call_api_fallback_once",
+                side_effect=[
+                    run_label.ModelCallError("HTTP 429 rate limited"),
+                    ("OK", 1, 1, []),
+                ],
+            ) as call_once:
+                with patch.object(run_label.time, "sleep") as sleep, patch.object(
+                    run_label,
+                    "temp_log_event",
+                ) as temp_log:
+                    result = run_label.call_api_fallback([{"role": "user", "content": "test"}])
+        finally:
+            run_label.API_MODELS = old_models
+
+        self.assertEqual(("OK", 1, 1, []), result)
+        self.assertEqual(2, call_once.call_count)
+        sleep.assert_not_called()
+        self.assertTrue(
+            any(call.args[:1] == ("model_pool_ready_retry",) for call in temp_log.call_args_list)
+        )
 
     def test_non_transient_pool_failure_does_not_wait(self):
         model = ApiModel(

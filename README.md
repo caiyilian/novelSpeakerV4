@@ -167,3 +167,36 @@ Note: First 4 dialogues are particularly difficult (narration mixed with dialogu
 ## License
 
 MIT
+
+## Desktop Control Center
+
+Install the desktop dependency once, then launch the five-volume task center:
+
+```cmd
+python -m pip install -r requirements-gui.txt
+launch_control_center.cmd
+```
+
+The first launch requires selecting the SenseNova API key file. The control center
+stores only the selected path, starts each volume as a hidden child process, and
+keeps running in the Windows system tray when the window is closed. Continue and
+retry preserve the current checkpoint. Restart creates a deduplicated backup before
+passing `--reset-state` to the annotation process.
+
+While a volume is running, its row shows the active first-pass or full-volume
+review stage and an estimated remaining time. First-pass ETA comes from the
+annotator's measured throughput with a live fallback estimate; review ETA is
+restored from its durable checkpoint after retries or interruptions.
+
+### Windows EXE
+
+Build the one-file Windows control center with:
+
+```cmd
+build_control_center_exe.cmd
+```
+
+The output is `dist\NovelSpeakerControlCenter.exe`. It contains both the GUI and
+the annotation worker. Keep the EXE in the repository root (or in its `dist`
+folder) so it can find the existing `data` and `config` directories. API keys and
+runtime data are never bundled into the executable.

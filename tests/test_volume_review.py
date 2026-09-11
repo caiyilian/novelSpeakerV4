@@ -58,6 +58,65 @@ class FakeModel:
                     for dialogue_id in ids
                 ]
             }
+        elif expected_name == "submit_scene_entity_graph":
+            focus_line = re.search(r"Focus ids: ([^\n]+)", user_text).group(1)
+            ids = [item.strip() for item in focus_line.split(",")]
+            line_by_id = {
+                dialogue_id: int(
+                    re.search(
+                        rf"^{re.escape(dialogue_id)} \[FOCUS\] L(\d+)",
+                        user_text,
+                        flags=re.MULTILINE,
+                    ).group(1)
+                )
+                for dialogue_id in ids
+            }
+            entity_id_by_speaker = {}
+            entities = []
+            for dialogue_id in ids:
+                speaker = self.speaker_by_id[dialogue_id]
+                if speaker == "非人物发声" or speaker in entity_id_by_speaker:
+                    continue
+                entity_id = f"E{len(entity_id_by_speaker) + 1}"
+                entity_id_by_speaker[speaker] = entity_id
+                citations = sorted(
+                    {
+                        line_by_id[item]
+                        for item in ids
+                        if self.speaker_by_id[item] == speaker
+                    }
+                )
+                entities.append(
+                    {
+                        "entity_id": entity_id,
+                        "canonical_label": speaker,
+                        "mentions": [speaker],
+                        "entity_kind": "named",
+                        "citations": citations,
+                        "confidence": "high",
+                        "reason": "The source explicitly names this local person.",
+                    }
+                )
+            args = {
+                "entities": entities,
+                "assignments": [
+                    {
+                        "id": dialogue_id,
+                        "entity_id": (
+                            "NONPERSON"
+                            if self.speaker_by_id[dialogue_id] == "非人物发声"
+                            else entity_id_by_speaker[self.speaker_by_id[dialogue_id]]
+                        ),
+                        "speaker": self.speaker_by_id[dialogue_id],
+                        "quote_type": "direct_speech",
+                        "evidence_basis": "explicit_attribution",
+                        "confidence": "high",
+                        "citations": [line_by_id[dialogue_id]],
+                        "reason": "The raw line explicitly binds the quote.",
+                    }
+                    for dialogue_id in ids
+                ],
+            }
         else:
             dialogue_id = re.search(
                 r"\[(?:Single target|Single recovery target)\]\n(D\d+)(?:;| only)",
@@ -228,7 +287,7 @@ class VolumeReviewStructureTests(unittest.TestCase):
         self.assertEqual(2, len(units))
         self.assertEqual((0, 1), (units[0]["focus_start"], units[0]["focus_end"]))
         self.assertEqual((1, 2), (units[1]["focus_start"], units[1]["focus_end"]))
-        self.assertTrue(all(str(unit["unit_id"]).startswith("R2-S") for unit in units))
+        self.assertTrue(all(str(unit["unit_id"]).startswith("R3-S") for unit in units))
 
     def test_packet_marks_exact_focus_and_provisional_visibility(self):
         novel = ["角色甲说：「第一句。」角色乙回答：「第二句。」"]
@@ -248,6 +307,63 @@ class VolumeReviewStructureTests(unittest.TestCase):
         self.assertIn("D1 [FOCUS]", blind)
         self.assertNotIn("provisional=", blind)
         self.assertIn("provisional=角色乙", visible)
+
+    def test_local_entity_graph_requires_every_alias_to_be_source_grounded(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            reviewer = VolumeSecondPassReviewer(
+                runtime_for(FakeModel({"D0": "角色甲"})),
+                novel_path=str(root / "novel.txt"),
+                labeled_path=str(root / "labeled.txt"),
+                vault_path=str(root / "evidence_vault.json"),
+                review_log_path=str(root / "volume_review.jsonl"),
+                temp_log_path=str(root / "volume_review.temp.jsonl"),
+                state_path=str(root / "volume_review_state.json"),
+                first_pass_path=str(root / "labeled.first_pass.txt"),
+            )
+            payload = {
+                "entities": [
+                    {
+                        "entity_id": "E1",
+                        "canonical_label": "角色甲",
+                        "mentions": ["角色甲", "店员"],
+                        "entity_kind": "named",
+                        "citations": [1],
+                        "confidence": "high",
+                        "reason": "The line identifies one local person.",
+                    }
+                ],
+                "assignments": [
+                    {
+                        "id": "D0",
+                        "entity_id": "E1",
+                        "speaker": "角色甲",
+                        "quote_type": "direct_speech",
+                        "evidence_basis": "explicit_attribution",
+                        "confidence": "high",
+                        "citations": [1],
+                        "reason": "The line binds the quote.",
+                    }
+                ],
+            }
+
+            valid, _ = reviewer._validate_scene_entity_graph(
+                payload,
+                {"D0"},
+                {1},
+                ["店员角色甲说道：「目标句。」"],
+            )
+            payload["entities"][0]["mentions"].append("不存在的称谓")
+            invalid, result = reviewer._validate_scene_entity_graph(
+                payload,
+                {"D0"},
+                {1},
+                ["店员角色甲说道：「目标句。」"],
+            )
+
+            self.assertTrue(valid)
+            self.assertFalse(invalid)
+            self.assertTrue(any("absent" in error for error in result["errors"]))
 
     def test_hesitation_before_other_self_introduction_keeps_prior_floor(self):
         novel = [
@@ -420,6 +536,227 @@ class VolumeReviewDecisionGateTests(unittest.TestCase):
             self.assertTrue(allowed)
             self.assertIn("direct", allowed_reason)
 
+    def test_named_to_generic_accepts_direct_binding_through_local_alias(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            reviewer = self.make_reviewer(Path(temp_dir))
+            all_candidate = {
+                jury_role: ("店员", "店员")
+                for jury_role, _instruction in JURY_SPECS
+            }
+            assessment = reviewer._assess_mirrored_jury(
+                "角色甲", "店员", mirrored_records(all_candidate)
+            )
+            candidate_group = {
+                "speaker": "店员",
+                "labels": ["店员", "年轻店员"],
+                "evidence_families": ["chronology", "local-entity-forward"],
+                "strong_reports": [
+                    {"agent": "VolumeBlindForward", **strong_verdict("店员")},
+                    {"agent": "VolumeLocalEntityForward", **strong_verdict("年轻店员")},
+                ],
+                "local_entity_citations": [1],
+                "local_graph_support": 3,
+                "local_entity_agent_count": 3,
+            }
+
+            allowed, reason = reviewer._transition_gate(
+                baseline="角色甲",
+                candidate="店员",
+                candidate_group=candidate_group,
+                jury_assessment=assessment,
+                novel_lines=["年轻店员说道：「目标句。」"],
+                target_line=1,
+                canonical_note="",
+            )
+
+            self.assertTrue(allowed)
+            self.assertIn("direct", reason)
+
+    def test_unanimous_local_entity_map_relaxes_one_mirrored_pair(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            reviewer = self.make_reviewer(Path(temp_dir))
+            speakers = {
+                jury_role: (
+                    ("店员", "店员")
+                    if index < 3 else ("角色甲", "角色甲")
+                )
+                for index, (jury_role, _instruction) in enumerate(JURY_SPECS)
+            }
+            assessment = reviewer._assess_mirrored_jury(
+                "角色甲", "店员", mirrored_records(speakers)
+            )
+            candidate_group = {
+                "speaker": "店员",
+                "labels": ["店员"],
+                "evidence_families": ["chronology", "local-entity-forward"],
+                "strong_reports": [
+                    {"agent": "VolumeBlindForward", **strong_verdict("店员")},
+                    {"agent": "VolumeLocalEntityForward", **strong_verdict("店员")},
+                    {"agent": "VolumeLocalEntityReverse", **strong_verdict("店员")},
+                    {"agent": "VolumeLocalEntityScope", **strong_verdict("店员")},
+                ],
+                "local_graph_support": 3,
+                "baseline_graph_support": 0,
+                "local_entity_agent_count": 3,
+                "local_entity_citations": [1],
+            }
+
+            allowed, reason = reviewer._transition_gate(
+                baseline="角色甲",
+                candidate="店员",
+                candidate_group=candidate_group,
+                jury_assessment=assessment,
+                novel_lines=["店员说道：「目标句。」"],
+                target_line=1,
+                canonical_note="",
+            )
+
+            self.assertEqual(3, assessment["candidate_pair_support"])
+            self.assertTrue(allowed)
+            self.assertIn("direct", reason)
+
+    def test_independent_panel_can_override_two_stable_candidate_juries(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            reviewer = self.make_reviewer(Path(temp_dir))
+            speakers = {
+                jury_role: (
+                    ("角色乙", "角色乙")
+                    if index < 2 else ("角色乙", "角色甲")
+                )
+                for index, (jury_role, _instruction) in enumerate(JURY_SPECS)
+            }
+            assessment = reviewer._assess_mirrored_jury(
+                "角色甲", "角色乙", mirrored_records(speakers)
+            )
+            reports = [
+                {
+                    "agent": agent,
+                    **strong_verdict("角色乙"),
+                }
+                for agent in (
+                    "VolumeBlindForward",
+                    "VolumeQuoteScope",
+                    "VolumeDialogueAct",
+                    "VolumeVoiceBoundary",
+                    "VolumeIdentityResolver",
+                    "VolumeLocalEntityForward",
+                    "VolumeLocalEntityReverse",
+                    "VolumeLocalEntityScope",
+                )
+            ]
+            candidate_group = {
+                "speaker": "角色乙",
+                "labels": ["角色乙"],
+                "evidence_families": [
+                    "chronology",
+                    "quote-scope",
+                    "dialogue-act",
+                    "voice-boundary",
+                    "identity",
+                    "local-entity-forward",
+                    "local-entity-reverse",
+                    "local-entity-scope",
+                ],
+                "strong_reports": reports,
+                "local_graph_support": 2,
+                "local_entity_agent_count": 3,
+            }
+
+            allowed, reason = reviewer._transition_gate(
+                baseline="角色甲",
+                candidate="角色乙",
+                candidate_group=candidate_group,
+                jury_assessment=assessment,
+                novel_lines=["「目标句。」"],
+                target_line=1,
+                canonical_note="",
+            )
+
+            self.assertFalse(assessment["passes_general_gate"])
+            self.assertTrue(allowed)
+            self.assertIn("independent-panel", reason)
+
+    def test_local_entity_conflict_blocks_unsupported_named_candidate(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            reviewer = self.make_reviewer(Path(temp_dir))
+            all_candidate = {
+                jury_role: ("角色乙", "角色乙")
+                for jury_role, _instruction in JURY_SPECS
+            }
+            assessment = reviewer._assess_mirrored_jury(
+                "角色甲", "角色乙", mirrored_records(all_candidate)
+            )
+            candidate_group = {
+                "speaker": "角色乙",
+                "evidence_families": ["chronology", "identity"],
+                "strong_reports": [
+                    {"agent": "VolumeBlindForward", **strong_verdict("角色乙")},
+                    {"agent": "VolumeIdentityResolver", **strong_verdict("角色乙")},
+                ],
+                "local_graph_support": 0,
+                "local_entity_agent_count": 3,
+                "competing_named_support": 3,
+            }
+
+            allowed, reason = reviewer._transition_gate(
+                baseline="角色甲",
+                candidate="角色乙",
+                candidate_group=candidate_group,
+                jury_assessment=assessment,
+                novel_lines=["「目标句。」"],
+                target_line=1,
+                canonical_note="",
+            )
+
+            self.assertFalse(allowed)
+            self.assertIn("contradicts", reason)
+
+    def test_generic_relabel_requires_unanimous_local_direct_binding(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            reviewer = self.make_reviewer(Path(temp_dir))
+            all_candidate = {
+                jury_role: ("店员", "店员")
+                for jury_role, _instruction in JURY_SPECS
+            }
+            assessment = reviewer._assess_mirrored_jury(
+                "少年", "店员", mirrored_records(all_candidate)
+            )
+            candidate_group = {
+                "speaker": "店员",
+                "labels": ["店员"],
+                "evidence_families": ["chronology", "local-entity-forward"],
+                "strong_reports": [
+                    {"agent": "VolumeBlindForward", **strong_verdict("店员")},
+                    {"agent": "VolumeLocalEntityForward", **strong_verdict("店员")},
+                ],
+                "local_graph_support": 3,
+                "local_entity_agent_count": 3,
+                "local_entity_citations": [1],
+            }
+
+            blocked, _ = reviewer._transition_gate(
+                baseline="少年",
+                candidate="店员",
+                candidate_group=candidate_group,
+                jury_assessment=assessment,
+                novel_lines=["门被推开了。"],
+                target_line=1,
+                canonical_note="",
+            )
+            allowed, reason = reviewer._transition_gate(
+                baseline="少年",
+                candidate="店员",
+                candidate_group=candidate_group,
+                jury_assessment=assessment,
+                novel_lines=["店员说道：「目标句。」"],
+                target_line=1,
+                canonical_note="",
+            )
+
+            self.assertFalse(blocked)
+            self.assertTrue(allowed)
+            self.assertIn("unanimous-local", reason)
+
     def test_nonperson_change_requires_both_boundary_specialists(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             reviewer = self.make_reviewer(Path(temp_dir))
@@ -554,6 +891,13 @@ class VolumeReviewRunTests(unittest.TestCase):
             ]
             self.assertEqual(9, len(scene_updates))
             self.assertEqual((9, 9), (scene_updates[-1]["completed"], scene_updates[-1]["total"]))
+            entity_updates = [
+                event for event in events
+                if event.get("event") == "task_complete"
+                and event.get("phase") == "local-entity-graph"
+            ]
+            self.assertEqual(3, len(entity_updates))
+            self.assertEqual((3, 3), (entity_updates[-1]["completed"], entity_updates[-1]["total"]))
             state = json.loads(root.joinpath("volume_review_state.json").read_text(encoding="utf-8"))
             self.assertEqual("complete", state["progress"]["phase"])
 
@@ -621,6 +965,7 @@ class VolumeReviewRunTests(unittest.TestCase):
 
             self.assertEqual("complete", result["status"])
             self.assertEqual(9, result["summary"]["unit_abstentions"])
+            self.assertEqual(3, result["summary"]["local_entity_abstentions"])
             self.assertEqual(0, result["summary"]["changed"])
             self.assertEqual(
                 "角色甲\n",
@@ -705,7 +1050,7 @@ L2: 角色乙说：「第二句。」
             result = reviewer.run([(1, "第一句。")])
 
             self.assertEqual("complete", result["status"])
-            self.assertEqual(18, model.calls)
+            self.assertEqual(21, model.calls)
             rejected = [
                 json.loads(line)
                 for line in root.joinpath("volume_review.temp.jsonl").read_text(encoding="utf-8").splitlines()

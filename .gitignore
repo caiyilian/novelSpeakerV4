@@ -1,6 +1,9 @@
 # Runtime data (large, not for GitHub)
 data/
 backup/
+runtime_logs/
+build/
+dist/
 
 # Config with server IP (sensitive)
 config/
@@ -18,3 +21,4 @@ _check*.py
 _verify*.py
 _pr_body.md
 _issue_body.md
+_release_notes.md
