@@ -76,7 +76,7 @@ from control_center_core import (
 
 
 APP_NAME = "NovelSpeakerControlCenter"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
 AUTOSTART_NAME = "NovelSpeaker Control Center"
 SETTINGS_PATH = PROJECT_ROOT / "config" / "control_center.ini"
 DEFAULT_LOG_DIR = PROJECT_ROOT / "runtime_logs"
@@ -1128,7 +1128,31 @@ QStatusBar { background: #f3f5f7; color: #52606b; }
 """
 
 
+def configure_worker_stdio() -> None:
+    """Make the packaged worker's pipe output independent of Windows ACP."""
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        reconfigure = getattr(stream, "reconfigure", None)
+        if not callable(reconfigure):
+            continue
+        try:
+            reconfigure(
+                encoding="utf-8",
+                errors="backslashreplace",
+                write_through=True,
+            )
+        except (OSError, TypeError, ValueError):
+            pass
+
+
 def run_packaged_worker(arguments: list[str]) -> int:
+    configure_worker_stdio()
+    if arguments == ["--encoding-smoke-test"]:
+        from run_label import _writeline
+
+        _writeline("UTF-8 packaged worker: • 中文输出正常")
+        return 0
+
     sys.argv = ["run_label.py", *arguments]
     from run_label import main as run_label_main
 

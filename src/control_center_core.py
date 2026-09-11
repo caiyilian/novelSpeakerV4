@@ -322,6 +322,7 @@ def build_process_environment(
     environment = dict(base if base is not None else os.environ)
     environment.update(
         {
+            "PYTHONIOENCODING": "utf-8:backslashreplace",
             "PYTHONUTF8": "1",
             "PYTHONUNBUFFERED": "1",
             "SENSENOVA_API_KEYS_FILE": str(Path(key_file).resolve()),

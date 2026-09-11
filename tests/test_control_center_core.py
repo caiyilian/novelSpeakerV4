@@ -106,6 +106,7 @@ class ControlCenterCoreTests(unittest.TestCase):
         self.assertEqual(str(key_path.resolve()), environment["SENSENOVA_API_KEYS_FILE"])
         self.assertEqual("0", environment["SENSENOVA_USE_ENV_PROXY"])
         self.assertEqual("0", environment["AGNES_USE_ENV_PROXY"])
+        self.assertEqual("utf-8:backslashreplace", environment["PYTHONIOENCODING"])
         self.assertTrue(environment["NOVELSPEAKER_PROJECT_ROOT"])
 
     def test_backup_copies_runtime_files_without_moving_sources(self):
