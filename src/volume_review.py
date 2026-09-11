@@ -14,11 +14,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from local_entity import LocalEntityConsensus, build_local_entity_consensus
 from quote_occurrence import align_quote_occurrences
 from scene_sequence import build_scene_segments
 
 
-REVIEW_VERSION = 2
+REVIEW_VERSION = 3
 QUOTE_TYPES = {
     "direct_speech",
     "partial_speech",
@@ -117,6 +118,24 @@ REVIEW_AGENT_SPECS = (
         True,
     ),
 )
+ENTITY_GRAPH_AGENT_SPECS = (
+    (
+        "VolumeLocalEntityForward",
+        "Read the raw scene in chronological order. First enumerate the distinct people physically or "
+        "conversationally active in the excerpt, then bind every FOCUS quote to one entity. Treat two "
+        "source expressions as aliases only when the local text proves that they denote the same person.",
+    ),
+    (
+        "VolumeLocalEntityReverse",
+        "Work backward from explicit attribution, actions and reply structure. Build a local cast before assigning "
+        "quotes, and actively test whether repeated descriptions denote one person or different people.",
+    ),
+    (
+        "VolumeLocalEntityScope",
+        "Audit quote containers and attribution scope first, then construct a scene-local entity map. Keep "
+        "addressees, nearby actors and speakers separate; preserve all source-grounded names and role mentions.",
+    ),
+)
 JURY_SPECS = (
     (
         "VolumeJuryForward",
@@ -150,6 +169,9 @@ REVIEW_AGENT_FAMILIES = {
     "VolumeVoiceBoundary": "voice-boundary",
     "VolumeIdentityResolver": "identity",
     "VolumeBaselineFalsifier": "falsification",
+    "VolumeLocalEntityForward": "local-entity-forward",
+    "VolumeLocalEntityReverse": "local-entity-reverse",
+    "VolumeLocalEntityScope": "local-entity-scope",
 }
 NONPERSON_QUOTE_TYPES = {"thought_or_narration", "sound_or_text"}
 
@@ -214,6 +236,96 @@ ASSIGNMENT_TOOL = {
                 }
             },
             "required": ["assignments"],
+        },
+    },
+}
+
+ENTITY_GRAPH_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "submit_scene_entity_graph",
+        "description": (
+            "Submit a source-grounded local person graph and bind every focus dialogue id to one entity."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "entities": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "entity_id": {"type": "string"},
+                            "canonical_label": {"type": "string"},
+                            "mentions": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                            "entity_kind": {
+                                "type": "string",
+                                "enum": ["named", "unnamed"],
+                            },
+                            "citations": {
+                                "type": "array",
+                                "items": {"type": "integer"},
+                            },
+                            "confidence": {
+                                "type": "string",
+                                "enum": ["high", "medium", "low"],
+                            },
+                            "reason": {"type": "string"},
+                        },
+                        "required": [
+                            "entity_id",
+                            "canonical_label",
+                            "mentions",
+                            "entity_kind",
+                            "citations",
+                            "confidence",
+                            "reason",
+                        ],
+                    },
+                },
+                "assignments": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "entity_id": {"type": "string"},
+                            "speaker": {"type": "string"},
+                            "quote_type": {
+                                "type": "string",
+                                "enum": sorted(QUOTE_TYPES),
+                            },
+                            "evidence_basis": {
+                                "type": "string",
+                                "enum": sorted(EVIDENCE_BASES),
+                            },
+                            "confidence": {
+                                "type": "string",
+                                "enum": ["high", "medium", "low"],
+                            },
+                            "citations": {
+                                "type": "array",
+                                "items": {"type": "integer"},
+                            },
+                            "reason": {"type": "string"},
+                        },
+                        "required": [
+                            "id",
+                            "entity_id",
+                            "speaker",
+                            "quote_type",
+                            "evidence_basis",
+                            "confidence",
+                            "citations",
+                            "reason",
+                        ],
+                    },
+                },
+            },
+            "required": ["entities", "assignments"],
         },
     },
 }
@@ -1822,6 +1934,203 @@ Use only the compact evidence packet. Do not restate or summarize it. Check exac
             errors.append(f"missing ids: {', '.join(missing)}")
         return not errors, {"assignments": normalized, "errors": errors}
 
+    def _validate_scene_entity_graph(
+        self,
+        args: dict[str, Any],
+        focus_ids: set[str],
+        allowed_lines: set[int],
+        novel_lines: list[str],
+    ) -> tuple[bool, dict[str, Any]]:
+        if not isinstance(args, dict):
+            return False, {"errors": ["entity graph must be an object"]}
+        raw_entities = args.get("entities")
+        raw_assignments = args.get("assignments")
+        if not isinstance(raw_entities, list) or not isinstance(raw_assignments, list):
+            return False, {"errors": ["entities and assignments must be arrays"]}
+
+        errors: list[str] = []
+        entities: list[dict[str, Any]] = []
+        entities_by_id: dict[str, dict[str, Any]] = {}
+
+        def local_citations(values: Any) -> list[int]:
+            citations: list[int] = []
+            for value in values or []:
+                try:
+                    line_num = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if line_num in allowed_lines and line_num not in citations:
+                    citations.append(line_num)
+            return citations
+
+        def appears_on_cited_line(label: str, citations: list[int]) -> bool:
+            return any(
+                1 <= line_num <= len(novel_lines)
+                and label in str(novel_lines[line_num - 1])
+                for line_num in citations
+            )
+
+        for raw_entity in raw_entities:
+            if not isinstance(raw_entity, dict):
+                errors.append("entity must be an object")
+                continue
+            entity_id = str(raw_entity.get("entity_id") or "").strip()
+            canonical = (
+                self.runtime.validate_speaker(
+                    str(raw_entity.get("canonical_label") or "")
+                )
+                or ""
+            )
+            citations = local_citations(raw_entity.get("citations"))
+            confidence = str(raw_entity.get("confidence") or "")
+            entity_kind = str(raw_entity.get("entity_kind") or "")
+            if not entity_id or entity_id == "NONPERSON":
+                errors.append("person entity id must be non-empty and not NONPERSON")
+                continue
+            if entity_id in entities_by_id:
+                errors.append(f"duplicate entity id {entity_id}")
+                continue
+            if not canonical or not self.runtime.is_valid_speaker(canonical):
+                errors.append(f"invalid canonical label for entity {entity_id}")
+                continue
+            if self.runtime.same_speaker(canonical, self.runtime.non_person_label):
+                errors.append(f"non-person label cannot define person entity {entity_id}")
+                continue
+            if not citations:
+                errors.append(f"entity {entity_id} requires local citations")
+                continue
+            if confidence not in CONFIDENCE_LEVELS:
+                errors.append(f"invalid confidence for entity {entity_id}")
+                continue
+            if entity_kind not in {"named", "unnamed"}:
+                errors.append(f"invalid entity kind for {entity_id}")
+                continue
+
+            mentions: list[str] = []
+            for raw_mention in raw_entity.get("mentions") or []:
+                mention = self.runtime.validate_speaker(str(raw_mention or "")) or ""
+                if (
+                    mention
+                    and self.runtime.is_valid_speaker(mention)
+                    and not self.runtime.same_speaker(
+                        mention, self.runtime.non_person_label
+                    )
+                    and mention not in mentions
+                ):
+                    mentions.append(mention)
+            if canonical not in mentions:
+                mentions.insert(0, canonical)
+            ungrounded = [
+                label
+                for label in mentions
+                if not appears_on_cited_line(label, citations)
+            ]
+            if ungrounded:
+                errors.append(
+                    f"entity {entity_id} has labels absent from cited raw lines: "
+                    + ", ".join(ungrounded)
+                )
+                continue
+            entity = {
+                "entity_id": entity_id,
+                "canonical_label": canonical,
+                "mentions": mentions,
+                "entity_kind": entity_kind,
+                "citations": citations,
+                "confidence": confidence,
+                "reason": _clip(str(raw_entity.get("reason") or ""), 600),
+            }
+            entities.append(entity)
+            entities_by_id[entity_id] = entity
+
+        assignments: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        for raw_assignment in raw_assignments:
+            if not isinstance(raw_assignment, dict):
+                errors.append("entity assignment must be an object")
+                continue
+            dialogue_id = str(raw_assignment.get("id") or "").strip()
+            entity_id = str(raw_assignment.get("entity_id") or "").strip()
+            speaker = (
+                self.runtime.validate_speaker(
+                    str(raw_assignment.get("speaker") or "")
+                )
+                or ""
+            )
+            citations = local_citations(raw_assignment.get("citations"))
+            confidence = str(raw_assignment.get("confidence") or "")
+            if dialogue_id not in focus_ids:
+                errors.append(f"unexpected id {dialogue_id!r}")
+                continue
+            if dialogue_id in seen_ids:
+                errors.append(f"duplicate id {dialogue_id}")
+                continue
+            if not speaker or not self.runtime.is_valid_speaker(speaker):
+                errors.append(f"invalid speaker for {dialogue_id}")
+                continue
+            if not citations:
+                errors.append(f"assignment {dialogue_id} requires a local citation")
+                continue
+            if confidence not in CONFIDENCE_LEVELS:
+                errors.append(f"invalid confidence for {dialogue_id}")
+                continue
+
+            is_nonperson = self.runtime.same_speaker(
+                speaker, self.runtime.non_person_label
+            )
+            if is_nonperson:
+                if entity_id != "NONPERSON":
+                    errors.append(
+                        f"non-person assignment {dialogue_id} must use NONPERSON entity id"
+                    )
+                    continue
+            else:
+                entity = entities_by_id.get(entity_id)
+                if entity is None:
+                    errors.append(
+                        f"assignment {dialogue_id} references unknown entity {entity_id!r}"
+                    )
+                    continue
+                entity_labels = [
+                    str(entity["canonical_label"]),
+                    *(str(value) for value in entity.get("mentions") or []),
+                ]
+                if not any(
+                    self.runtime.same_speaker(speaker, label)
+                    for label in entity_labels
+                ):
+                    errors.append(
+                        f"assignment {dialogue_id} speaker is outside entity {entity_id}"
+                    )
+                    continue
+            seen_ids.add(dialogue_id)
+            assignments.append(
+                {
+                    "id": dialogue_id,
+                    "entity_id": entity_id,
+                    "speaker": speaker,
+                    "quote_type": _normalize_quote_type(
+                        raw_assignment.get("quote_type")
+                    ),
+                    "evidence_basis": _normalize_evidence_basis(
+                        raw_assignment.get("evidence_basis")
+                    ),
+                    "confidence": confidence,
+                    "citations": citations,
+                    "reason": _clip(
+                        str(raw_assignment.get("reason") or ""), 600
+                    ),
+                }
+            )
+        missing = sorted(focus_ids - seen_ids)
+        if missing:
+            errors.append(f"missing ids: {', '.join(missing)}")
+        return not errors, {
+            "entities": entities,
+            "assignments": assignments,
+            "errors": errors,
+        }
+
     def _validate_verdict(
         self,
         args: dict[str, Any],
@@ -1862,7 +2171,11 @@ Use only the compact evidence packet. Do not restate or summarize it. Check exac
             "errors": errors,
         }
 
-    def _group_reports(self, reports: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _group_reports(
+        self,
+        reports: list[dict[str, Any]],
+        local_entities: LocalEntityConsensus | None = None,
+    ) -> list[dict[str, Any]]:
         groups: list[dict[str, Any]] = []
         for report in reports:
             speaker = report.get("speaker") or ""
@@ -1871,13 +2184,23 @@ Use only the compact evidence packet. Do not restate or summarize it. Check exac
                     item
                     for item in groups
                     if self.runtime.same_speaker(str(item["speaker"]), str(speaker))
+                    or (
+                        local_entities is not None
+                        and local_entities.same_entity(
+                            str(item["speaker"]), str(speaker)
+                        )
+                    )
                 ),
                 None,
             )
             if group is None:
-                groups.append({"speaker": speaker, "reports": [report]})
+                groups.append(
+                    {"speaker": speaker, "labels": [speaker], "reports": [report]}
+                )
             else:
                 group["reports"].append(report)
+                if speaker not in group["labels"]:
+                    group["labels"].append(speaker)
         groups.sort(key=lambda item: len(item["reports"]), reverse=True)
         return groups
 
@@ -1886,12 +2209,34 @@ Use only the compact evidence packet. Do not restate or summarize it. Check exac
         groups: list[dict[str, Any]],
         baseline: str,
         *,
+        dialogue_id: str = "",
+        local_entities: LocalEntityConsensus | None = None,
         limit: int = 2,
     ) -> list[dict[str, Any]]:
         supported: list[dict[str, Any]] = []
         for group in groups:
             speaker = str(group.get("speaker") or "")
             if not speaker or self.runtime.same_speaker(speaker, baseline):
+                continue
+            same_baseline_entity = bool(
+                local_entities is not None
+                and local_entities.same_entity(speaker, baseline)
+            )
+            if local_entities is not None:
+                canonical_speaker, canonical_note = local_entities.canonical_for(
+                    speaker
+                )
+            else:
+                canonical_speaker, canonical_note = self.runtime.canonicalize_speaker(
+                    speaker
+                )
+            naming_upgrade = bool(
+                same_baseline_entity
+                and self.runtime.is_generic_speaker(baseline)
+                and not self.runtime.is_generic_speaker(canonical_speaker)
+                and not self.runtime.same_speaker(canonical_speaker, baseline)
+            )
+            if same_baseline_entity and not naming_upgrade:
                 continue
             strong_reports = [
                 report for report in group.get("reports") or []
@@ -1907,7 +2252,43 @@ Use only the compact evidence packet. Do not restate or summarize it. Check exac
             enriched = dict(group)
             enriched["strong_reports"] = strong_reports
             enriched["evidence_families"] = sorted(families)
+            local_labels = list(group.get("labels") or [speaker])
+            if local_entities is not None:
+                for label in local_entities.labels_for(speaker):
+                    if label not in local_labels:
+                        local_labels.append(label)
+                local_graph_support = local_entities.assignment_support(
+                    dialogue_id, speaker
+                )
+                baseline_graph_support = local_entities.assignment_support(
+                    dialogue_id, baseline
+                )
+                candidate_presence = local_entities.presence_support(speaker)
+                competing_named_support = local_entities.competing_named_support(
+                    dialogue_id, speaker
+                )
+                local_entity_citations = sorted(
+                    local_entities.citations_for(speaker)
+                )
+                local_entity_agent_count = local_entities.agent_count
+            else:
+                local_graph_support = 0
+                baseline_graph_support = 0
+                candidate_presence = 0
+                competing_named_support = 0
+                local_entity_citations = []
+                local_entity_agent_count = 0
+            enriched["labels"] = local_labels
+            enriched["canonical_speaker"] = canonical_speaker
+            enriched["canonical_note"] = canonical_note
+            enriched["local_graph_support"] = local_graph_support
+            enriched["baseline_graph_support"] = baseline_graph_support
+            enriched["candidate_presence_support"] = candidate_presence
+            enriched["competing_named_support"] = competing_named_support
+            enriched["local_entity_citations"] = local_entity_citations
+            enriched["local_entity_agent_count"] = local_entity_agent_count
             enriched["support_score"] = (
+                local_graph_support,
                 len(families),
                 len(strong_reports),
                 len(group.get("reports") or []),
@@ -1992,10 +2373,11 @@ Use only the compact evidence packet. Do not restate or summarize it. Check exac
         occurrence: dict[str, Any] | None = None,
     ) -> tuple[bool, str]:
         pair_support = int(jury_assessment.get("candidate_pair_support") or 0)
+        baseline_pair_support = int(
+            jury_assessment.get("baseline_pair_support") or 0
+        )
+        other_pair_support = int(jury_assessment.get("other_pair_support") or 0)
         pair_total = len(JURY_SPECS)
-        if not jury_assessment.get("passes_general_gate"):
-            return False, "mirrored-jury-general-gate-failed"
-
         baseline_nonperson = self.runtime.same_speaker(
             baseline, self.runtime.non_person_label
         )
@@ -2022,17 +2404,89 @@ Use only the compact evidence packet. Do not restate or summarize it. Check exac
             for value in (report.get("citations") or [])
             if str(value).isdigit()
         }
-        directly_bound = _has_local_speaker_binding(
-            candidate,
-            citations,
-            novel_lines,
-            target_line=target_line,
-            occurrence=occurrence,
+        citations.update(
+            int(value)
+            for value in candidate_group.get("local_entity_citations") or []
+            if str(value).isdigit()
         )
+        local_labels = [
+            str(value)
+            for value in [candidate, *(candidate_group.get("labels") or [])]
+            if str(value).strip()
+        ]
+        directly_bound = any(
+            _has_local_speaker_binding(
+                label,
+                citations,
+                novel_lines,
+                target_line=target_line,
+                occurrence=occurrence,
+            )
+            for label in dict.fromkeys(local_labels)
+        )
+        local_graph_support = int(
+            candidate_group.get("local_graph_support") or 0
+        )
+        baseline_graph_support = int(
+            candidate_group.get("baseline_graph_support") or 0
+        )
+        local_entity_agent_count = int(
+            candidate_group.get("local_entity_agent_count") or 0
+        )
+        strong_count = len(candidate_group.get("strong_reports") or [])
+        family_count = len(candidate_group.get("evidence_families") or [])
+
+        panel_override = bool(
+            not other_pair_support
+            and not baseline_pair_support
+            and (
+                (
+                    pair_support >= 2
+                    and strong_count >= 8
+                    and family_count >= 3
+                    and local_graph_support >= 2
+                )
+                or (
+                    pair_support >= 1
+                    and strong_count >= 10
+                    and family_count >= 4
+                    and local_graph_support >= 3
+                    and directly_bound
+                )
+            )
+        )
+        general_gate_passed = bool(
+            jury_assessment.get("passes_general_gate") or panel_override
+        )
+        if not general_gate_passed:
+            return False, "mirrored-jury-and-independent-panel-gates-failed"
+
+        if (
+            not candidate_nonperson
+            and not candidate_generic
+            and local_entity_agent_count >= 2
+            and local_graph_support == 0
+            and int(candidate_group.get("competing_named_support") or 0) >= 2
+            and not directly_bound
+        ):
+            return False, "local-entity-graph-contradicts-unsupported-named-candidate"
+
+        if (
+            local_entity_agent_count >= 2
+            and local_graph_support == 0
+            and baseline_graph_support >= 2
+            and not directly_bound
+        ):
+            return False, "local-entity-graph-supports-baseline-over-candidate"
 
         if candidate_nonperson != baseline_nonperson:
-            if pair_support != pair_total:
-                return False, "personhood-change-requires-all-mirrored-juries"
+            unanimous_local_entity = bool(
+                local_entity_agent_count >= 3
+                and local_graph_support == local_entity_agent_count
+            )
+            required_pairs = pair_total - 1 if unanimous_local_entity else pair_total
+            if pair_support < required_pairs:
+                return False, "personhood-change-lacks-required-mirrored-jury-support"
             if candidate_nonperson:
                 scope_agents = {
                     str(report.get("agent") or "")
@@ -2042,24 +2496,43 @@ Use only the compact evidence packet. Do not restate or summarize it. Check exac
                 }
                 if not {"VolumeQuoteScope", "VolumeVoiceBoundary"}.issubset(scope_agents):
                     return False, "nonperson-change-lacks-two-specialized-boundary-reviews"
-                return True, "all-mirrored-juries-plus-two-nonperson-specialists"
+                return True, "mirrored-juries-plus-two-nonperson-specialists"
             if not directly_bound:
                 return False, "person-restoration-lacks-local-speaker-binding"
-            return True, "all-mirrored-juries-plus-local-person-binding"
+            return True, "mirrored-juries-plus-local-person-binding"
 
         if baseline_named and candidate_generic:
-            if pair_support != pair_total:
-                return False, "named-to-generic-requires-all-mirrored-juries"
+            unanimous_local_entity = bool(
+                local_entity_agent_count >= 3
+                and local_graph_support == local_entity_agent_count
+            )
+            required_pairs = pair_total - 1 if unanimous_local_entity else pair_total
+            if pair_support < required_pairs:
+                return False, "named-to-generic-lacks-required-mirrored-jury-support"
             if not directly_bound:
                 return False, "named-to-generic-lacks-direct-contrary-attribution"
-            return True, "all-mirrored-juries-plus-direct-generic-attribution"
+            return True, "mirrored-juries-plus-direct-generic-attribution"
 
         if baseline_generic and not candidate_generic and not candidate_nonperson:
             families = set(candidate_group.get("evidence_families") or [])
-            if not canonical_note and "identity" not in families and not directly_bound:
+            if (
+                "identity" not in families
+                and not directly_bound
+                and local_graph_support < 2
+            ):
                 return False, "generic-to-name-lacks-identity-or-attribution-evidence"
             return True, "mirrored-jury-plus-naming-specificity-evidence"
 
+        if baseline_generic and candidate_generic:
+            required_local_support = max(2, local_entity_agent_count)
+            if pair_support != pair_total:
+                return False, "generic-relabel-requires-all-mirrored-juries"
+            if local_graph_support < required_local_support or not directly_bound:
+                return False, "generic-relabel-lacks-unanimous-local-entity-binding"
+            return True, "all-mirrored-juries-plus-unanimous-local-entity-binding"
+
+        if panel_override and not jury_assessment.get("passes_general_gate"):
+            return True, "independent-panel-override-of-mirrored-jury-instability"
         return True, "three-of-four-stable-mirrored-jury-families"
 
     @staticmethod
@@ -2106,6 +2579,23 @@ Mandatory rules:
 10. Call submit_volume_assignments exactly once with every FOCUS id. Do not answer in prose.
 """
 
+    def _entity_graph_system_prompt(self, agent: str, instruction: str) -> str:
+        return f"""You are {agent}, an independent scene-local entity mapper in a generic novel dialogue-speaker system.
+
+{instruction}
+
+Mandatory rules:
+1. You receive raw novel text and exact quote ids only. No provisional labels, global roster, memory, or other reviewer's output may be used.
+2. Build the local person entities before assigning quotes. One entity may have several source expressions only when cited local text proves they denote the same person.
+3. Keep different unnamed people separate even when they share a broad role. Keep a speaker separate from addressees and nearby actors.
+4. canonical_label and every mention must occur verbatim in one of that entity's cited raw lines. Never translate, transliterate, modernize or invent a label.
+5. Prefer a locally explicit personal name as canonical_label when the same local entity also has role or appearance descriptions. Otherwise use the most stable source-grounded local expression.
+6. Bind the source speaker of each exact FOCUS quote occurrence. Check pre-quote, post-quote and delayed attribution before conversational inference.
+7. Use entity_id=NONPERSON and speaker={self.runtime.non_person_label} only for narration, thought, displayed text or non-human sound. Do not add NONPERSON to entities.
+8. Every entity and assignment needs at least one raw-line citation from this packet. Confidence is evidence strength, not fluency.
+9. Call submit_scene_entity_graph exactly once with all active person entities needed by the FOCUS assignments and exactly one assignment for every FOCUS id. Do not answer in prose.
+"""
+
     def _jury_system_prompt(self, agent: str, instruction: str) -> str:
         return f"""You are {agent}, an independent final juror for one exact novel quote.
 
@@ -2147,10 +2637,18 @@ The two displayed hypotheses and reviewer reports are fallible evidence, not vot
 
         existing = _load_jsonl(self.review_log_path)
         unit_results: dict[tuple[str, str], dict[str, Any]] = {}
+        entity_graph_results: dict[tuple[str, str], dict[str, Any]] = {}
         jury_results: dict[tuple[str, str, str, str], dict[str, Any]] = {}
         for record in existing:
             if record.get("kind") == "unit" and record.get("status") == "complete":
                 unit_results[(str(record.get("unit_id")), str(record.get("agent")))] = record
+            elif (
+                record.get("kind") == "entity-graph"
+                and record.get("status") == "complete"
+            ):
+                entity_graph_results[
+                    (str(record.get("unit_id")), str(record.get("agent")))
+                ] = record
             elif record.get("kind") == "jury" and record.get("status") == "complete":
                 jury_results[
                     (
@@ -2262,6 +2760,134 @@ The two displayed hypotheses and reviewer reports are fallible evidence, not vot
             total=unit_task_total,
         )
 
+        entity_task_total = len(units) * len(ENTITY_GRAPH_AGENT_SPECS)
+        entity_task_initial = sum(
+            (str(unit["unit_id"]), agent) in entity_graph_results
+            for unit in units
+            for agent, _instruction in ENTITY_GRAPH_AGENT_SPECS
+        )
+        entity_phase_started = time.time()
+        self._emit_progress(
+            "phase_start",
+            phase="local-entity-graph",
+            completed=entity_task_initial,
+            total=entity_task_total,
+            resumed=entity_task_initial,
+        )
+        for unit_number, unit in enumerate(units, start=1):
+            for agent, instruction in ENTITY_GRAPH_AGENT_SPECS:
+                key = (str(unit["unit_id"]), agent)
+                record = entity_graph_results.get(key)
+                if record is None:
+                    packet, focus_ids, allowed_lines = format_review_packet(
+                        novel_lines,
+                        occurrences,
+                        labels,
+                        unit,
+                        include_provisional=False,
+                    )
+                    task_meta = {
+                        "phase": "local-entity-graph",
+                        "kind": "entity-graph",
+                        "unit_id": unit["unit_id"],
+                        "unit_number": unit_number,
+                        "unit_count": len(units),
+                        "agent": agent,
+                    }
+                    result = self._run_resilient_task(
+                        lambda: self._call_structured(
+                            agent=agent,
+                            system_prompt=self._entity_graph_system_prompt(
+                                agent, instruction
+                            ),
+                            user_content=packet,
+                            tool=ENTITY_GRAPH_TOOL,
+                            expected_name="submit_scene_entity_graph",
+                            validator=lambda args, ids=focus_ids, lines=allowed_lines: self._validate_scene_entity_graph(
+                                args, ids, lines, novel_lines
+                            ),
+                            record_meta={
+                                "kind": "entity-graph",
+                                "unit_id": unit["unit_id"],
+                            },
+                        ),
+                        task_meta=task_meta,
+                        abstain_factory=lambda error: {
+                            "entities": [],
+                            "assignments": [],
+                            "abstained": True,
+                            "error": error,
+                        },
+                    )
+                    graph = {
+                        "entities": list(result.get("entities") or []),
+                        "assignments": list(result.get("assignments") or []),
+                    }
+                    record = {
+                        "kind": "entity-graph",
+                        "status": "complete",
+                        "unit_id": unit["unit_id"],
+                        "unit_number": unit_number,
+                        "unit_count": len(units),
+                        "agent": agent,
+                        "graph": graph,
+                        "abstained": bool(result.get("abstained")),
+                        "error": result.get("error", ""),
+                        "time": time.time(),
+                    }
+                    _append_jsonl(self.review_log_path, record)
+                    entity_graph_results[key] = record
+                    completed = len(entity_graph_results)
+                    elapsed = time.time() - entity_phase_started
+                    completed_here = max(1, completed - entity_task_initial)
+                    eta = elapsed / completed_here * max(
+                        0, entity_task_total - completed
+                    )
+                    progress = {
+                        "phase": "local-entity-graph",
+                        "status": "running",
+                        "completed": completed,
+                        "total": entity_task_total,
+                        "eta_seconds": eta,
+                        "unit_id": unit["unit_id"],
+                        "unit_number": unit_number,
+                        "unit_count": len(units),
+                        "agent": agent,
+                    }
+                    self._checkpoint_progress(**progress)
+                    self._emit_progress("task_complete", **progress)
+                for assignment in (record.get("graph") or {}).get(
+                    "assignments"
+                ) or []:
+                    item = dict(assignment)
+                    item["agent"] = agent
+                    item["local_entity_report"] = True
+                    assignments_by_id.setdefault(str(item.get("id")), []).append(
+                        item
+                    )
+
+        self._emit_progress(
+            "phase_complete",
+            phase="local-entity-graph",
+            completed=entity_task_total,
+            total=entity_task_total,
+        )
+
+        local_entities_by_unit: dict[str, LocalEntityConsensus] = {}
+        for unit in units:
+            unit_id = str(unit["unit_id"])
+            records = [
+                entity_graph_results[(unit_id, agent)]
+                for agent, _instruction in ENTITY_GRAPH_AGENT_SPECS
+                if (unit_id, agent) in entity_graph_results
+            ]
+            local_entities_by_unit[unit_id] = build_local_entity_consensus(
+                records,
+                same_speaker=self.runtime.same_speaker,
+                is_generic_speaker=self.runtime.is_generic_speaker,
+                canonicalize_speaker=self.runtime.canonicalize_speaker,
+            )
+
         deterministic_constraints = derive_deterministic_sequence_constraints(
             novel_lines,
             occurrences,
@@ -2276,7 +2902,13 @@ The two displayed hypotheses and reviewer reports are fallible evidence, not vot
             dialogue_id = str(occurrence["id"])
             baseline = labels[index]
             reports = assignments_by_id.get(dialogue_id, [])
-            groups = self._group_reports(reports)
+            unit = next(
+                item
+                for item in units
+                if int(item["focus_start"]) <= index < int(item["focus_end"])
+            )
+            local_entities = local_entities_by_unit[str(unit["unit_id"])]
+            groups = self._group_reports(reports, local_entities)
             deterministic = deterministic_constraints.get(dialogue_id)
             deterministic_selected = ""
             deterministic_canonical_note = ""
@@ -2307,9 +2939,17 @@ The two displayed hypotheses and reviewer reports are fallible evidence, not vot
                 "occurrence": occurrence,
                 "index": index,
                 "baseline": baseline,
+                "unit": unit,
+                "local_entities": local_entities,
+                "local_entity_summary": local_entities.summary(),
                 "reports": reports,
                 "groups": groups,
-                "alternatives": self._supported_alternative_groups(groups, baseline),
+                "alternatives": self._supported_alternative_groups(
+                    groups,
+                    baseline,
+                    dialogue_id=dialogue_id,
+                    local_entities=local_entities,
+                ),
                 "deterministic": deterministic,
                 "deterministic_selected": deterministic_selected,
                 "deterministic_canonical_note": deterministic_canonical_note,
@@ -2318,7 +2958,12 @@ The two displayed hypotheses and reviewer reports are fallible evidence, not vot
             }
 
         planned_jury_keys = {
-            (dialogue_id, str(group["speaker"]), jury_role, orientation)
+            (
+                dialogue_id,
+                str(group.get("canonical_speaker") or group["speaker"]),
+                jury_role,
+                orientation,
+            )
             for dialogue_id, plan in review_plan.items()
             if not plan.get("deterministic_applicable")
             for group in plan["alternatives"]
@@ -2390,11 +3035,7 @@ The two displayed hypotheses and reviewer reports are fallible evidence, not vot
                 )
                 continue
 
-            unit = next(
-                item
-                for item in units
-                if int(item["focus_start"]) <= index < int(item["focus_end"])
-            )
+            unit = plan["unit"]
             packet, _, allowed_lines = format_review_packet(
                 novel_lines,
                 occurrences,
@@ -2408,10 +3049,17 @@ The two displayed hypotheses and reviewer reports are fallible evidence, not vot
                 f"citations={report.get('citations')}; reason={report.get('reason')}"
                 for report in reports
             ]
+            candidate_rows.append(
+                "- Raw-only local entity consensus: "
+                + json.dumps(plan["local_entity_summary"], ensure_ascii=False)
+            )
             accepted: list[dict[str, Any]] = []
             assessments: list[dict[str, Any]] = []
             for alternative_group in alternatives:
-                candidate = str(alternative_group["speaker"])
+                candidate = str(
+                    alternative_group.get("canonical_speaker")
+                    or alternative_group["speaker"]
+                )
                 candidate_records: list[dict[str, Any]] = []
                 for jury_role, jury_instruction in JURY_SPECS:
                     for orientation, reverse_order in JURY_ORIENTATIONS:
@@ -2507,7 +3155,10 @@ The two displayed hypotheses and reviewer reports are fallible evidence, not vot
                     candidate,
                     candidate_records,
                 )
-                canonical_candidate, canonical_note = self.runtime.canonicalize_speaker(candidate)
+                canonical_candidate = candidate
+                canonical_note = str(
+                    alternative_group.get("canonical_note") or ""
+                )
                 gate_passed, gate_reason = self._transition_gate(
                     baseline=baseline,
                     candidate=canonical_candidate,
@@ -2595,11 +3246,17 @@ The two displayed hypotheses and reviewer reports are fallible evidence, not vot
             "dialogues": len(dialogue_list),
             "units": len(units),
             "review_agents": len(REVIEW_AGENT_SPECS),
+            "local_entity_agents": len(ENTITY_GRAPH_AGENT_SPECS),
+            "local_entity_tasks": entity_task_total,
             "jury_agents": len(JURY_SPECS),
             "jury_orientations": len(JURY_ORIENTATIONS),
             "jury_tasks": jury_task_total,
             "unit_abstentions": sum(
                 bool(record.get("abstained")) for record in unit_results.values()
+            ),
+            "local_entity_abstentions": sum(
+                bool(record.get("abstained"))
+                for record in entity_graph_results.values()
             ),
             "jury_abstentions": sum(
                 bool(record.get("abstained"))
