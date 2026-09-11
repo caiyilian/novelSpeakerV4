@@ -16,6 +16,7 @@ from control_center_core import (  # noqa: E402
     build_process_environment,
     build_run_arguments,
     format_eta,
+    find_project_root,
     parse_duration_seconds,
     parse_progress_line,
     read_recent_failure,
@@ -26,6 +27,18 @@ from control_center_core import (  # noqa: E402
 
 
 class ControlCenterCoreTests(unittest.TestCase):
+    def test_project_root_search_skips_empty_nested_data_directory(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "project"
+            nested = root / "dist" / "v1.0.1"
+            (root / "data").mkdir(parents=True)
+            (root / "data" / "novel.txt").write_text("novel", encoding="utf-8")
+            (nested / "data").mkdir(parents=True)
+
+            detected = find_project_root([nested])
+
+        self.assertEqual(root, detected)
+
     def test_volume_specs_use_root_data_for_first_volume(self):
         root = Path("C:/workspace")
         specs = volume_specs(root)

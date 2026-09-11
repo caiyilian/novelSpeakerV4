@@ -76,7 +76,7 @@ from control_center_core import (
 
 
 APP_NAME = "NovelSpeakerControlCenter"
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.0.2"
 AUTOSTART_NAME = "NovelSpeaker Control Center"
 SETTINGS_PATH = PROJECT_ROOT / "config" / "control_center.ini"
 DEFAULT_LOG_DIR = PROJECT_ROOT / "runtime_logs"
@@ -769,6 +769,8 @@ class ControlCenter(QMainWindow):
             QMessageBox.critical(self, "开机启动设置失败", str(exc))
 
     def _start_volume(self, number: int, reset: bool = False) -> None:
+        if not self._validate_project_inputs():
+            return
         if not self._validate_key_file():
             QMessageBox.warning(self, "缺少 API Key 文件", "请先选择 API Key 文件。")
             return
@@ -836,8 +838,24 @@ class ControlCenter(QMainWindow):
                 self._backup_volume(spec.number)
 
     def _continue_all(self) -> None:
+        if not self._validate_project_inputs():
+            return
         for spec in self.specs:
             self._start_volume(spec.number, reset=False)
+
+    def _validate_project_inputs(self) -> bool:
+        missing = [spec.novel_path for spec in self.specs if not spec.novel_path.is_file()]
+        if not missing:
+            return True
+        details = "\n".join(str(path) for path in missing)
+        QMessageBox.critical(
+            self,
+            "找不到小说文件",
+            "控制台没有找到五卷输入文件，因此没有启动任何标注进程。\n\n"
+            f"当前项目目录：{PROJECT_ROOT}\n\n缺少：\n{details}\n\n"
+            "请把 EXE 放到项目根目录或其下级目录后重新打开。",
+        )
+        return False
 
     def _stop_volume(self, number: int) -> None:
         self.controllers[number].stop()
@@ -1164,6 +1182,10 @@ def main() -> int:
     if "--worker" in sys.argv[1:]:
         worker_index = sys.argv.index("--worker")
         return run_packaged_worker(sys.argv[worker_index + 1 :])
+    if "--print-project-root" in sys.argv[1:]:
+        configure_worker_stdio()
+        print(PROJECT_ROOT, flush=True)
+        return 0
 
     parser = argparse.ArgumentParser(description="NovelSpeaker desktop control center")
     parser.add_argument("--minimized", action="store_true")

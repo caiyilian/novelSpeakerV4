@@ -14,6 +14,20 @@ from pathlib import Path
 from typing import Iterable, Mapping
 
 
+def find_project_root(start_paths: Iterable[Path]) -> Path | None:
+    """Find the nearest ancestor containing the real first-volume novel."""
+    seen: set[Path] = set()
+    for start in start_paths:
+        resolved = Path(start).expanduser().resolve()
+        for candidate in (resolved, *resolved.parents):
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            if (candidate / "data" / "novel.txt").is_file():
+                return candidate
+    return None
+
+
 def _detect_project_root() -> Path:
     configured = os.environ.get("NOVELSPEAKER_PROJECT_ROOT", "").strip()
     if configured:
@@ -21,11 +35,8 @@ def _detect_project_root() -> Path:
 
     if getattr(sys, "frozen", False):
         executable_dir = Path(sys.executable).resolve().parent
-        candidates = (executable_dir, Path.cwd().resolve(), executable_dir.parent)
-        for candidate in candidates:
-            if (candidate / "data").is_dir():
-                return candidate
-        return executable_dir
+        detected = find_project_root((executable_dir, Path.cwd()))
+        return detected or executable_dir
 
     return Path(__file__).resolve().parents[1]
 
