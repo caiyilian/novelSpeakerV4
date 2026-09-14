@@ -16,6 +16,7 @@ import requests  # noqa: E402
 from unittest.mock import patch  # noqa: E402
 
 import run_label  # noqa: E402
+from sensenova_pool import SenseNovaPoolConfig  # noqa: E402
 from run_label import (  # noqa: E402
     ApiModel,
     NON_PERSON_LABEL,
@@ -290,6 +291,8 @@ class ApiFallbackTests(unittest.TestCase):
         models = []
 
         with patch.object(
+            run_label, "load_sensenova_pool_config", return_value=None
+        ), patch.object(
             run_label, "_load_opencode_provider", return_value=provider
         ), patch.object(run_label, "_load_sensenova_keys", return_value=keys):
             run_label._append_sensenova_models(models)
@@ -336,9 +339,44 @@ class ApiFallbackTests(unittest.TestCase):
             first_models,
         )
 
+    def test_local_sensenova_proxy_replaces_cached_direct_key_pool(self):
+        pool = SenseNovaPoolConfig(
+            base_url="http://127.0.0.1:18787/v1",
+            api_key="local-token",
+            models={
+                run_label.SENSENOVA_MODEL: {
+                    "limit": {"context": run_label.SENSENOVA_NATIVE_CONTEXT_LIMIT},
+                }
+            },
+            source="opencode",
+        )
+        models = []
+
+        with patch.object(
+            run_label,
+            "load_sensenova_pool_config",
+            return_value=pool,
+        ), patch.object(
+            run_label,
+            "_load_sensenova_keys",
+            return_value=["old-key-1", "old-key-2"],
+        ) as load_keys:
+            run_label._append_sensenova_models(models)
+
+        self.assertEqual(["sense-nova-pool"], [model.name for model in models])
+        self.assertEqual("http://127.0.0.1:18787/v1", models[0].base_url)
+        self.assertEqual("local-token", models[0].api_key)
+        self.assertFalse(models[0].use_env_proxy)
+        self.assertEqual("", models[0].round_robin_group)
+        load_keys.assert_not_called()
+
     def test_sensenova_key_file_does_not_require_opencode_provider(self):
         models = []
         with patch.object(
+            run_label,
+            "load_sensenova_pool_config",
+            return_value=None,
+        ), patch.object(
             run_label,
             "_load_opencode_provider",
             return_value=None,
@@ -360,6 +398,10 @@ class ApiFallbackTests(unittest.TestCase):
         run_label.API_MODEL_FILTER = "sense-nova,agnes"
         try:
             with patch.object(
+                run_label,
+                "load_sensenova_pool_config",
+                return_value=None,
+            ), patch.object(
                 run_label,
                 "_load_opencode_provider",
                 return_value=None,
@@ -398,6 +440,10 @@ class ApiFallbackTests(unittest.TestCase):
         run_label.API_MODEL_FILTER = "sense-nova,agnes"
         try:
             with patch.object(
+                run_label,
+                "load_sensenova_pool_config",
+                return_value=None,
+            ), patch.object(
                 run_label,
                 "_load_opencode_provider",
                 side_effect=lambda name: provider if name == "sense-nova" else None,

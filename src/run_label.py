@@ -46,6 +46,7 @@ from quote_occurrence import (
     occurrence_context,
 )
 from volume_review import VolumeReviewRuntime, VolumeSecondPassReviewer
+from sensenova_pool import load_sensenova_pool_config, probe_sensenova_pool
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(SCRIPT_DIR)
@@ -350,6 +351,31 @@ def _suffix_name(index):
 
 
 def _append_sensenova_models(models):
+    pool_config = load_sensenova_pool_config()
+    if pool_config is not None:
+        model_conf = pool_config.models.get(SENSENOVA_MODEL) or {}
+        actual_model = model_conf.get("id") or SENSENOVA_MODEL
+        configured_limit = (model_conf.get("limit") or {}).get("context")
+        try:
+            native_context_limit = max(
+                SENSENOVA_NATIVE_CONTEXT_LIMIT,
+                int(configured_limit),
+            )
+        except (TypeError, ValueError):
+            native_context_limit = SENSENOVA_NATIVE_CONTEXT_LIMIT
+        models.append(ApiModel(
+            "sense-nova-pool",
+            actual_model,
+            pool_config.base_url,
+            pool_config.api_key,
+            min_interval=0.0,
+            tool_capable=True,
+            display_model=f"{SENSENOVA_MODEL} (local pool)",
+            use_env_proxy=False,
+            native_context_limit=native_context_limit,
+        ))
+        return
+
     provider = _load_opencode_provider("sense-nova") or {}
     opts = provider.get("options", {}) or {}
     configured_models = provider.get("models", {}) or {}
@@ -677,6 +703,23 @@ def init_api_fallback(health_check="all"):
             "No API fallback models configured. Add SenseNova keys, set ZHIPUAI_API_KEY, "
             "or configure opencode providers."
         )
+
+    local_pool = next(
+        (model for model in API_MODELS if model.name == "sense-nova-pool"),
+        None,
+    )
+    if local_pool is not None:
+        pool_config = load_sensenova_pool_config()
+        pool_status = probe_sensenova_pool(pool_config, timeout=2.0) if pool_config else None
+        if pool_status and pool_status.reachable:
+            network = "online" if pool_status.network_online is not False else "offline"
+            print(
+                "  SenseNova local proxy: "
+                f"{pool_status.account_count} accounts, {pool_status.status}, {network}"
+            )
+        else:
+            reason = pool_status.error if pool_status else "configuration unavailable"
+            print(f"  SenseNova local proxy: UNREACHABLE ({reason})")
 
     sensenova_pool_size = sum(
         model.round_robin_group == "sense-nova" for model in API_MODELS

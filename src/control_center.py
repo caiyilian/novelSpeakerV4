@@ -73,10 +73,16 @@ from control_center_core import (
     read_review_progress,
     volume_specs,
 )
+from sensenova_pool import (
+    SenseNovaPoolConfig,
+    SenseNovaPoolStatus,
+    load_sensenova_pool_config,
+    probe_sensenova_pool,
+)
 
 
 APP_NAME = "NovelSpeakerControlCenter"
-APP_VERSION = "1.0.2"
+APP_VERSION = "1.0.3"
 AUTOSTART_NAME = "NovelSpeaker Control Center"
 SETTINGS_PATH = PROJECT_ROOT / "config" / "control_center.ini"
 DEFAULT_LOG_DIR = PROJECT_ROOT / "runtime_logs"
@@ -151,6 +157,20 @@ class BackupTask(QRunnable):
             self.signals.finished.emit(self.spec.number, "", 0, str(exc))
 
 
+class PoolProbeSignals(QObject):
+    finished = pyqtSignal(object)
+
+
+class PoolProbeTask(QRunnable):
+    def __init__(self, config: SenseNovaPoolConfig):
+        super().__init__()
+        self.config = config
+        self.signals = PoolProbeSignals()
+
+    def run(self) -> None:
+        self.signals.finished.emit(probe_sensenova_pool(self.config))
+
+
 class VolumeProcess(QObject):
     output = pyqtSignal(int, str)
     state_changed = pyqtSignal(int, str, str)
@@ -177,7 +197,14 @@ class VolumeProcess(QObject):
     def running(self) -> bool:
         return self.process.state() != QProcess.ProcessState.NotRunning
 
-    def start(self, key_file: Path, log_dir: Path, reset: bool = False) -> bool:
+    def start(
+        self,
+        key_file: Path | None,
+        log_dir: Path,
+        reset: bool = False,
+        *,
+        use_sensenova_pool: bool = True,
+    ) -> bool:
         if self.running:
             return False
 
@@ -192,7 +219,10 @@ class VolumeProcess(QObject):
         self.run_start_labeled = 0 if reset else read_progress(self.spec).labeled
 
         environment = QProcessEnvironment.systemEnvironment()
-        for name, value in build_process_environment(key_file).items():
+        for name, value in build_process_environment(
+            key_file,
+            use_sensenova_pool=use_sensenova_pool,
+        ).items():
             environment.insert(name, value)
         self.process.setProcessEnvironment(environment)
         self.process.setWorkingDirectory(str(PROJECT_ROOT))
@@ -473,6 +503,10 @@ class ControlCenter(QMainWindow):
         self.pending_restart: set[int] = set()
         self.thread_pool = QThreadPool.globalInstance()
         self.thread_pool.setMaxThreadCount(2)
+        self.pool_config = load_sensenova_pool_config()
+        self.pool_status: SenseNovaPoolStatus | None = None
+        self._pool_probe_pending = False
+        self._pool_probe_task: PoolProbeTask | None = None
         self._allow_quit = False
         self._tray_notice_shown = False
 
@@ -484,12 +518,18 @@ class ControlCenter(QMainWindow):
         self._build_tray()
         self._load_settings()
         self._create_controllers()
+        self._start_pool_probe()
         self._refresh_all_progress(initial=True)
 
         self.refresh_timer = QTimer(self)
         self.refresh_timer.setInterval(2000)
         self.refresh_timer.timeout.connect(self._refresh_all_progress)
         self.refresh_timer.start()
+
+        self.pool_timer = QTimer(self)
+        self.pool_timer.setInterval(15000)
+        self.pool_timer.timeout.connect(self._start_pool_probe)
+        self.pool_timer.start()
 
         if start_minimized and self.tray.isSystemTrayAvailable():
             QTimer.singleShot(0, self.hide)
@@ -511,7 +551,7 @@ class ControlCenter(QMainWindow):
         title_box.addWidget(subtitle)
         title_row.addLayout(title_box)
         title_row.addStretch()
-        self.pool_label = QLabel("模型池  SenseNova × 0  ·  Agnes × 3")
+        self.pool_label = QLabel("模型池  SenseNova 本地代理")
         self.pool_label.setObjectName("poolLabel")
         title_row.addWidget(self.pool_label)
         root.addLayout(title_row)
@@ -522,13 +562,35 @@ class ControlCenter(QMainWindow):
         settings_layout.setContentsMargins(16, 14, 16, 14)
         settings_layout.setSpacing(9)
 
+        proxy_row = QHBoxLayout()
+        proxy_label = QLabel("SenseNova 代理")
+        proxy_label.setFixedWidth(100)
+        self.pool_url = QLineEdit()
+        self.pool_url.setReadOnly(True)
+        self.pool_url.setText(
+            self.pool_config.base_url if self.pool_config else "未在 OpenCode 中配置"
+        )
+        self.pool_refresh_button = QPushButton("检测")
+        self.pool_refresh_button.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload)
+        )
+        self.pool_refresh_button.clicked.connect(lambda: self._start_pool_probe(force=True))
+        self.pool_state = QLabel("等待检测")
+        self.pool_state.setObjectName("muted")
+        self.pool_state.setFixedWidth(110)
+        proxy_row.addWidget(proxy_label)
+        proxy_row.addWidget(self.pool_url, 1)
+        proxy_row.addWidget(self.pool_refresh_button)
+        proxy_row.addWidget(self.pool_state)
+        settings_layout.addLayout(proxy_row)
+
         key_row = QHBoxLayout()
-        key_label = QLabel("API Key 文件")
+        key_label = QLabel("直连 Key（备用）")
         key_label.setFixedWidth(100)
         self.key_path = QLineEdit()
         self.key_path.setReadOnly(True)
-        self.key_path.setPlaceholderText("需要选择文件")
-        self.key_button = QPushButton("选择文件")
+        self.key_path.setPlaceholderText("代理正常时无需选择")
+        self.key_button = QPushButton("选择备用文件")
         self.key_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DialogOpenButton))
         self.key_button.clicked.connect(self._choose_key_file)
         self.key_count = QLabel("未选择")
@@ -564,7 +626,7 @@ class ControlCenter(QMainWindow):
         log_row.addWidget(self.autostart)
         settings_layout.addLayout(log_row)
 
-        self.key_warning = QLabel("请选择 API Key 文件后再启动标注任务")
+        self.key_warning = QLabel("正在检测 SenseNova 本地代理")
         self.key_warning.setObjectName("warning")
         settings_layout.addWidget(self.key_warning)
         root.addWidget(settings_band)
@@ -703,11 +765,62 @@ class ControlCenter(QMainWindow):
         self.settings.setValue("geometry", self.saveGeometry())
         self.settings.sync()
 
-    def _validate_key_file(self) -> bool:
+    def _selected_key_file(self) -> Path | None:
         path = Path(self.key_path.text().strip()) if self.key_path.text().strip() else None
-        valid = bool(path and path.is_file())
+        return path if path and path.is_file() else None
+
+    def _pool_available(self) -> bool:
+        return bool(
+            self.pool_config
+            and self.pool_status
+            and self.pool_status.reachable
+            and self.pool_status.account_count > 0
+        )
+
+    def _start_pool_probe(self, force: bool = False) -> None:
+        if self._pool_probe_pending:
+            return
+        if force or self.pool_config is None:
+            self.pool_config = load_sensenova_pool_config()
+            self.pool_url.setText(
+                self.pool_config.base_url if self.pool_config else "未在 OpenCode 中配置"
+            )
+        if self.pool_config is None:
+            self.pool_status = SenseNovaPoolStatus(
+                reachable=False,
+                error="OpenCode 中没有 sensenova-pool 配置",
+            )
+            self.pool_state.setText("未配置")
+            self._validate_key_file()
+            return
+
+        self._pool_probe_pending = True
+        self.pool_state.setText("检测中")
+        self.pool_refresh_button.setEnabled(False)
+        task = PoolProbeTask(self.pool_config)
+        task.signals.finished.connect(self._on_pool_probe_finished)
+        self._pool_probe_task = task
+        self.thread_pool.start(task)
+
+    def _on_pool_probe_finished(self, status: SenseNovaPoolStatus) -> None:
+        self._pool_probe_pending = False
+        self._pool_probe_task = None
+        self.pool_status = status
+        self.pool_refresh_button.setEnabled(True)
+        if status.reachable and status.account_count > 0:
+            suffix = "" if status.network_online is not False else " · 离线"
+            self.pool_state.setText(f"{status.account_count} 个账号{suffix}")
+        elif status.reachable:
+            self.pool_state.setText("无可用账号")
+        else:
+            self.pool_state.setText("不可连接")
+        self._validate_key_file()
+
+    def _validate_key_file(self) -> bool:
+        path = self._selected_key_file()
+        fallback_valid = path is not None
         count = 0
-        if valid and path:
+        if fallback_valid and path:
             try:
                 keys = {
                     line.strip()
@@ -716,10 +829,31 @@ class ControlCenter(QMainWindow):
                 }
                 count = len(keys)
             except OSError:
-                valid = False
-        self.key_warning.setVisible(not valid)
-        self.key_count.setText(f"{count} 个 Key" if valid else "未选择")
-        self.pool_label.setText(f"模型池  SenseNova × {count}  ·  Agnes × 3")
+                fallback_valid = False
+        pool_available = self._pool_available()
+        valid = pool_available or fallback_valid
+        self.key_count.setText(f"{count} 个备用" if fallback_valid else "未选择")
+        if pool_available and self.pool_status:
+            self.pool_label.setText(
+                f"模型池  SenseNova 代理 × {self.pool_status.account_count}"
+            )
+            self.key_warning.setVisible(False)
+        elif fallback_valid:
+            self.pool_label.setText(f"模型池  SenseNova 直连 × {count}")
+            self.key_warning.setText(
+                f"SenseNova 本地代理不可用，将使用 {count} 个直连备用 Key"
+            )
+            self.key_warning.setVisible(True)
+        else:
+            self.pool_label.setText("模型池  SenseNova 不可用")
+            if self._pool_probe_pending:
+                self.key_warning.setText("正在检测 SenseNova 本地代理")
+            else:
+                detail = self.pool_status.error if self.pool_status else "尚未检测"
+                self.key_warning.setText(
+                    f"SenseNova 本地代理不可用，且未选择直连备用 Key：{detail}"
+                )
+            self.key_warning.setVisible(True)
         self.all_continue.setEnabled(valid)
         for row in self.rows.values():
             if row.state not in {
@@ -739,7 +873,7 @@ class ControlCenter(QMainWindow):
         current = self.key_path.text() or str(PROJECT_ROOT / "config")
         selected, _filter = QFileDialog.getOpenFileName(
             self,
-            "选择 API Key 文件",
+            "选择直连备用 API Key 文件",
             current,
             "所有文件 (*)",
         )
@@ -772,15 +906,20 @@ class ControlCenter(QMainWindow):
         if not self._validate_project_inputs():
             return
         if not self._validate_key_file():
-            QMessageBox.warning(self, "缺少 API Key 文件", "请先选择 API Key 文件。")
+            QMessageBox.warning(
+                self,
+                "SenseNova 不可用",
+                "请先启动 SenseNova 本地代理，或选择直连备用 API Key 文件。",
+            )
             return
         controller = self.controllers[number]
         if controller.running:
             return
         controller.start(
-            Path(self.key_path.text()),
+            self._selected_key_file(),
             Path(self.log_path.text() or DEFAULT_LOG_DIR),
             reset=reset,
+            use_sensenova_pool=self._pool_available(),
         )
 
     def _continue_volume(self, number: int) -> None:
@@ -1169,6 +1308,18 @@ def run_packaged_worker(arguments: list[str]) -> int:
         from run_label import _writeline
 
         _writeline("UTF-8 packaged worker: • 中文输出正常")
+        return 0
+    if arguments == ["--pool-smoke-test"]:
+        import run_label
+
+        run_label.MODEL_PROVIDER = "api-fallback"
+        run_label.API_MODEL_FILTER = "sense-nova"
+        run_label.init_api_fallback("first")
+        selected = [model for model in run_label.API_MODELS if model.name == "sense-nova-pool"]
+        if len(selected) != 1:
+            print("POOL_SMOKE_FAILED: local pool was not selected", flush=True)
+            return 2
+        print(f"POOL_SMOKE_OK: {selected[0].label}", flush=True)
         return 0
 
     sys.argv = ["run_label.py", *arguments]
