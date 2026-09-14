@@ -1,7 +1,7 @@
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 0, 2, 0),
-    prodvers=(1, 0, 2, 0),
+    filevers=(1, 0, 3, 0),
+    prodvers=(1, 0, 3, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -16,11 +16,11 @@ VSVersionInfo(
         [
           StringStruct(u'CompanyName', u'NovelSpeaker'),
           StringStruct(u'FileDescription', u'NovelSpeaker Control Center'),
-          StringStruct(u'FileVersion', u'1.0.2'),
+          StringStruct(u'FileVersion', u'1.0.3'),
           StringStruct(u'InternalName', u'NovelSpeakerControlCenter'),
           StringStruct(u'OriginalFilename', u'NovelSpeakerControlCenter.exe'),
           StringStruct(u'ProductName', u'NovelSpeaker Control Center'),
-          StringStruct(u'ProductVersion', u'1.0.2')
+          StringStruct(u'ProductVersion', u'1.0.3')
         ]
       )
     ]),

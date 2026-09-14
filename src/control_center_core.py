@@ -43,7 +43,7 @@ def _detect_project_root() -> Path:
 
 PROJECT_ROOT = _detect_project_root()
 DIALOGUE_PATTERN = re.compile(r"「([^」]+)」")
-MODEL_FILTER = "sense-nova,agnes"
+MODEL_FILTER = "sense-nova"
 FIRST_PASS_PROGRESS_PATTERN = re.compile(
     r"\[(?P<completed>\d+)\s*/\s*(?P<total>\d+)\].*?"
     r"remaining=(?P<eta>(?:\d+[dhms])+)",
@@ -327,8 +327,10 @@ def build_run_arguments(
 
 
 def build_process_environment(
-    key_file: Path,
+    key_file: Path | None,
     base: Mapping[str, str] | None = None,
+    *,
+    use_sensenova_pool: bool = True,
 ) -> dict[str, str]:
     environment = dict(base if base is not None else os.environ)
     environment.update(
@@ -336,12 +338,16 @@ def build_process_environment(
             "PYTHONIOENCODING": "utf-8:backslashreplace",
             "PYTHONUTF8": "1",
             "PYTHONUNBUFFERED": "1",
-            "SENSENOVA_API_KEYS_FILE": str(Path(key_file).resolve()),
+            "SENSENOVA_POOL_ENABLED": "1" if use_sensenova_pool else "0",
             "SENSENOVA_USE_ENV_PROXY": "0",
             "AGNES_USE_ENV_PROXY": "0",
             "NOVELSPEAKER_PROJECT_ROOT": str(PROJECT_ROOT),
         }
     )
+    if key_file is not None:
+        environment["SENSENOVA_API_KEYS_FILE"] = str(Path(key_file).resolve())
+    else:
+        environment.pop("SENSENOVA_API_KEYS_FILE", None)
     agnes_key_file = PROJECT_ROOT / "config" / "agnes_api_key"
     if agnes_key_file.is_file():
         environment["AGNES_API_KEY_FILE"] = str(agnes_key_file)

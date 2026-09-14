@@ -115,12 +115,29 @@ class ControlCenterCoreTests(unittest.TestCase):
 
     def test_process_environment_uses_selected_key_file_and_direct_connections(self):
         key_path = Path("C:/keys/accounts.txt")
-        environment = build_process_environment(key_path, {"PATH": os.environ.get("PATH", "")})
+        environment = build_process_environment(
+            key_path,
+            {"PATH": os.environ.get("PATH", "")},
+            use_sensenova_pool=False,
+        )
         self.assertEqual(str(key_path.resolve()), environment["SENSENOVA_API_KEYS_FILE"])
+        self.assertEqual("0", environment["SENSENOVA_POOL_ENABLED"])
         self.assertEqual("0", environment["SENSENOVA_USE_ENV_PROXY"])
         self.assertEqual("0", environment["AGNES_USE_ENV_PROXY"])
         self.assertEqual("utf-8:backslashreplace", environment["PYTHONIOENCODING"])
         self.assertTrue(environment["NOVELSPEAKER_PROJECT_ROOT"])
+
+    def test_process_environment_can_use_pool_without_a_key_file(self):
+        environment = build_process_environment(
+            None,
+            {
+                "PATH": os.environ.get("PATH", ""),
+                "SENSENOVA_API_KEYS_FILE": "stale-key-file",
+            },
+        )
+
+        self.assertEqual("1", environment["SENSENOVA_POOL_ENABLED"])
+        self.assertNotIn("SENSENOVA_API_KEYS_FILE", environment)
 
     def test_backup_copies_runtime_files_without_moving_sources(self):
         with tempfile.TemporaryDirectory() as temp_dir:
