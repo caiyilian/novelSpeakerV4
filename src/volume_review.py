@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import shutil
+import tempfile
 import time
 import re
 from collections import Counter
@@ -17,6 +18,7 @@ from typing import Any, Callable
 from local_entity import LocalEntityConsensus, build_local_entity_consensus
 from quote_occurrence import align_quote_occurrences
 from scene_sequence import build_scene_segments
+from atomic_file import replace_with_retry
 
 
 REVIEW_VERSION = 3
@@ -405,12 +407,21 @@ def _append_jsonl(path: str | Path, payload: dict[str, Any]) -> None:
 def _write_json_atomic(path: str | Path, payload: dict[str, Any]) -> None:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_suffix(target.suffix + ".tmp")
-    with open(temporary, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, ensure_ascii=False, indent=2)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(temporary, target)
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=target.parent,
+        prefix=target.name + ".", suffix=".tmp", delete=False,
+    ) as handle:
+        temporary = Path(handle.name)
+        try:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        except Exception:
+            handle.close()
+            temporary.unlink()
+            raise
+    # Retain both versions if publication fails permanently, for recovery.
+    replace_with_retry(temporary, target)
 
 
 def _load_json(path: str | Path) -> dict[str, Any]:
@@ -1099,7 +1110,7 @@ class VolumeSecondPassReviewer:
             stamp = time.strftime("%Y%m%d-%H%M%S")
             for path in (self.review_log_path, self.temp_log_path, self.state_path):
                 if os.path.exists(path):
-                    os.replace(path, f"{path}.stale-{stamp}")
+                    replace_with_retry(path, f"{path}.stale-{stamp}")
             shutil.copy2(self.labeled_path, self.first_pass_path)
             state = {
                 "version": REVIEW_VERSION,
@@ -3239,7 +3250,7 @@ The two displayed hypotheses and reviewer reports are fallible evidence, not vot
             os.fsync(handle.fileno())
         if len(reviewed_labels) != len(dialogue_list):
             raise RuntimeError("Reviewed label count changed unexpectedly")
-        os.replace(output_path, self.labeled_path)
+        replace_with_retry(output_path, self.labeled_path)
 
         changed_count = sum(bool(item.get("changed")) for item in decisions)
         summary = {
