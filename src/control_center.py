@@ -82,7 +82,7 @@ from sensenova_pool import (
 
 
 APP_NAME = "NovelSpeakerControlCenter"
-APP_VERSION = "1.0.3"
+APP_VERSION = "1.0.4"
 AUTOSTART_NAME = "NovelSpeaker Control Center"
 SETTINGS_PATH = PROJECT_ROOT / "config" / "control_center.ini"
 DEFAULT_LOG_DIR = PROJECT_ROOT / "runtime_logs"
