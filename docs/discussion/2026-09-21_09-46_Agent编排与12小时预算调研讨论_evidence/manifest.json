@@ -1,0 +1,122 @@
+[
+  {
+    "name": "codex",
+    "repo": "openai/codex",
+    "sha": "75db67bbc6a18200b52698c8870adaedd7746dea",
+    "date": "2026-09-21T01:19:40Z",
+    "path": "tmp\\agent_survey\\20260921\\codex"
+  },
+  {
+    "name": "opencode",
+    "repo": "anomalyco/opencode",
+    "sha": "17b76788754736b118fa6779a02936286f66aa61",
+    "date": "2026-09-21T08:40:48+08:00",
+    "path": "tmp\\agent_survey\\20260921\\opencode"
+  },
+  {
+    "name": "lazycodex",
+    "repo": "code-yeongyu/lazycodex",
+    "sha": "1372b0124688b792b8f04618bf72aa08a8d0aa46",
+    "date": "2026-09-20T18:38:52Z",
+    "path": "tmp\\agent_survey\\20260921\\lazycodex"
+  },
+  {
+    "name": "deepseek-harness",
+    "repo": "deepseek-ai/deepseek-harness",
+    "sha": "ddefc45fbc7f8e46dd73185e68295696d1297887",
+    "date": "2026-09-17T21:19:19+08:00",
+    "path": "tmp\\agent_survey\\20260921\\deepseek-harness"
+  },
+  {
+    "name": "pi",
+    "repo": "earendil-works/pi",
+    "sha": "890f920884f6d21fc7617d236ef9e1cc5d7a0ef8",
+    "date": "2026-09-21T01:14:53+02:00",
+    "path": "tmp\\agent_survey\\20260921\\pi"
+  },
+  {
+    "name": "deepagents",
+    "repo": "langchain-ai/deepagents",
+    "sha": "a764619aa8c850bc75e2e916cf53a587637d8c81",
+    "date": "2026-09-20T20:30:33-04:00",
+    "path": "tmp\\agent_survey\\20260921\\deepagents"
+  },
+  {
+    "name": "langgraph",
+    "repo": "langchain-ai/langgraph",
+    "sha": "ed384f3a124660db6dccd6c53eaad48e1457e0b5",
+    "date": "2026-09-20T12:50:31-07:00",
+    "path": "tmp\\agent_survey\\20260921\\langgraph"
+  },
+  {
+    "name": "pydantic-ai",
+    "repo": "pydantic/pydantic-ai",
+    "sha": "c4898abb54dc25ae6f6aef208a4c0661b30a455e",
+    "date": "2026-09-18T21:42:06-06:00",
+    "path": "tmp\\agent_survey\\20260921\\pydantic-ai"
+  },
+  {
+    "name": "mastra",
+    "repo": "mastra-ai/mastra",
+    "sha": "ad9e51e842d5e326a40f6271f64b7b6e58f5d252",
+    "date": "2026-09-21T00:57:52Z",
+    "path": "tmp\\agent_survey\\20260921\\mastra"
+  },
+  {
+    "name": "letta",
+    "repo": "letta-ai/letta",
+    "sha": "5bcdd177d70fa2b31a754cfcd801e77b2e1ab16a",
+    "date": "2026-09-10T10:59:06-07:00",
+    "path": "tmp\\agent_survey\\20260921\\letta"
+  },
+  {
+    "name": "deer-flow",
+    "repo": "bytedance/deer-flow",
+    "sha": "29d285731b326a728a9df33d3641f73b68bbe48b",
+    "date": "2026-09-21T07:34:09+08:00",
+    "path": "tmp\\agent_survey\\20260921\\deer-flow"
+  },
+  {
+    "name": "agno",
+    "repo": "agno-agi/agno",
+    "sha": "dc86cf20d254efea68fb03784c38264d08a86908",
+    "date": "2026-09-21T03:29:02+05:30",
+    "path": "tmp\\agent_survey\\20260921\\agno"
+  },
+  {
+    "name": "openhands",
+    "repo": "OpenHands/software-agent-sdk",
+    "sha": "856d99d48e4b11c70c5f1cab21e7830570dbc324",
+    "date": "2026-09-20T19:00:59Z",
+    "path": "tmp\\agent_survey\\20260921\\openhands"
+  },
+  {
+    "name": "harness-of-harness",
+    "repo": "Flesymeb/HarnessOfHarness",
+    "sha": "c0ee1fd362ecaff67e614ad16b492b3d1f1ac6c1",
+    "date": "2026-09-08T15:24:52+08:00",
+    "path": "tmp\\agent_survey\\20260921\\harness-of-harness"
+  },
+  {
+    "name": "dcp",
+    "repo": "Opencode-DCP/opencode-dynamic-context-pruning",
+    "sha": "d637981555a18c3992472268a0657a948925d5fa",
+    "date": "2026-09-20T13:32:10-04:00",
+    "path": "tmp\\agent_survey\\20260921\\dcp"
+  },
+  {
+    "name": "letta-code",
+    "repo": "letta-ai/letta-code",
+    "sha": "fb34d2023b6eca8c816134b3dab55b1bf317f52d",
+    "date": "2026-09-20T18:23:14-07:00",
+    "path": "tmp\\agent_survey\\20260921\\letta-code"
+  },
+  {
+    "name": "langchain",
+    "repo": "langchain-ai/langchain",
+    "sha": "4af7ab8fcb98c2dc211d9e34cddedffa23eba4d9",
+    "date": "2026-09-20T13:52:00-05:00",
+    "path": "tmp\\agent_survey\\20260921\\langchain",
+    "checkout": "sparse: agent implementation and tests"
+  }
+]

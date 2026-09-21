@@ -1,0 +1,5973 @@
+[
+  {
+    "path": "src\\analyze_full.py",
+    "lines": 272,
+    "definitions": []
+  },
+  {
+    "path": "src\\analyze_log.py",
+    "lines": 232,
+    "definitions": [
+      {
+        "name": "load_logs",
+        "line": 29,
+        "end": 32,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "extract_agent_data",
+        "line": 35,
+        "end": 91,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "plot_token_consumption",
+        "line": 94,
+        "end": 128,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "plot_tool_calls",
+        "line": 131,
+        "end": 163,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "print_statistics",
+        "line": 166,
+        "end": 187,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "main",
+        "line": 190,
+        "end": 228,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "src\\analyze_v2.py",
+    "lines": 206,
+    "definitions": []
+  },
+  {
+    "path": "src\\atomic_file.py",
+    "lines": 27,
+    "definitions": [
+      {
+        "name": "replace_with_retry",
+        "line": 7,
+        "end": 27,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "src\\check_code.py",
+    "lines": 57,
+    "definitions": [
+      {
+        "name": "load_forbidden_terms",
+        "line": 12,
+        "end": 16,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "main",
+        "line": 19,
+        "end": 53,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "src\\check_roster.py",
+    "lines": 125,
+    "definitions": [
+      {
+        "name": "load_roster",
+        "line": 33,
+        "end": 45,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "scan_py_files",
+        "line": 48,
+        "end": 77,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "main",
+        "line": 80,
+        "end": 121,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "src\\control_center.py",
+    "lines": 1365,
+    "definitions": [
+      {
+        "name": "app_icon",
+        "line": 91,
+        "end": 104,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "autostart_command",
+        "line": 107,
+        "end": 117,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "set_windows_autostart",
+        "line": 120,
+        "end": 138,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "BackupSignals",
+        "line": 141,
+        "end": 142,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "BackupTask",
+        "line": 145,
+        "end": 157,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "PoolProbeSignals",
+        "line": 160,
+        "end": 161,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "PoolProbeTask",
+        "line": 164,
+        "end": 171,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "VolumeProcess",
+        "line": 174,
+        "end": 329,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "VolumeRow",
+        "line": 332,
+        "end": 488,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "ControlCenter",
+        "line": 491,
+        "end": 1190,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "configure_worker_stdio",
+        "line": 1288,
+        "end": 1302,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "run_packaged_worker",
+        "line": 1305,
+        "end": 1329,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "main",
+        "line": 1332,
+        "end": 1361,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "__init__",
+        "line": 146,
+        "end": 150,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "run",
+        "line": 152,
+        "end": 157,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "__init__",
+        "line": 165,
+        "end": 168,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "run",
+        "line": 170,
+        "end": 171,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "__init__",
+        "line": 179,
+        "end": 194,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "running",
+        "line": 197,
+        "end": 198,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "start",
+        "line": 200,
+        "end": 237,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "stop",
+        "line": 239,
+        "end": 245,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_kill_if_running",
+        "line": 247,
+        "end": 249,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_started",
+        "line": 251,
+        "end": 252,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_read_output",
+        "line": 254,
+        "end": 277,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_parse_progress_output",
+        "line": 279,
+        "end": 288,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "estimated_first_pass_eta",
+        "line": 290,
+        "end": 307,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_finished",
+        "line": 309,
+        "end": 325,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_process_error",
+        "line": 327,
+        "end": 329,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "__init__",
+        "line": 352,
+        "end": 441,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "update_progress",
+        "line": 443,
+        "end": 452,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "set_eta",
+        "line": 454,
+        "end": 461,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "set_status",
+        "line": 463,
+        "end": 488,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "__init__",
+        "line": 492,
+        "end": 535,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_build_ui",
+        "line": 537,
+        "end": 718,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_build_tray",
+        "line": 720,
+        "end": 740,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_create_controllers",
+        "line": 742,
+        "end": 748,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_load_settings",
+        "line": 750,
+        "end": 759,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_save_settings",
+        "line": 761,
+        "end": 766,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_selected_key_file",
+        "line": 768,
+        "end": 770,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_pool_available",
+        "line": 772,
+        "end": 778,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_start_pool_probe",
+        "line": 780,
+        "end": 803,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_on_pool_probe_finished",
+        "line": 805,
+        "end": 817,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_validate_key_file",
+        "line": 819,
+        "end": 870,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_choose_key_file",
+        "line": 872,
+        "end": 883,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_choose_log_directory",
+        "line": 885,
+        "end": 893,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_toggle_autostart",
+        "line": 895,
+        "end": 903,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_start_volume",
+        "line": 905,
+        "end": 923,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_continue_volume",
+        "line": 925,
+        "end": 926,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_restart_volume",
+        "line": 928,
+        "end": 939,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_backup_volume",
+        "line": 941,
+        "end": 954,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_backup_finished",
+        "line": 956,
+        "end": 972,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_backup_all",
+        "line": 974,
+        "end": 977,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_continue_all",
+        "line": 979,
+        "end": 983,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_validate_project_inputs",
+        "line": 985,
+        "end": 997,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_stop_volume",
+        "line": 999,
+        "end": 1000,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_stop_all",
+        "line": 1002,
+        "end": 1004,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_on_output",
+        "line": 1006,
+        "end": 1012,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_on_state_changed",
+        "line": 1014,
+        "end": 1019,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_on_finished",
+        "line": 1021,
+        "end": 1025,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_refresh_progress",
+        "line": 1027,
+        "end": 1074,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_refresh_all_progress",
+        "line": 1076,
+        "end": 1092,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_update_summary",
+        "line": 1094,
+        "end": 1101,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_switch_console",
+        "line": 1103,
+        "end": 1106,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "console_clear",
+        "line": 1108,
+        "end": 1111,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_toggle_console",
+        "line": 1113,
+        "end": 1124,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_open_log_directory",
+        "line": 1126,
+        "end": 1129,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_open_volume_log",
+        "line": 1131,
+        "end": 1140,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_show_window",
+        "line": 1142,
+        "end": 1145,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_tray_activated",
+        "line": 1147,
+        "end": 1152,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "closeEvent",
+        "line": 1154,
+        "end": 1168,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_quit_application",
+        "line": 1170,
+        "end": 1190,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "src\\control_center_core.py",
+    "lines": 460,
+    "definitions": [
+      {
+        "name": "find_project_root",
+        "line": 17,
+        "end": 28,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_detect_project_root",
+        "line": 31,
+        "end": 41,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "VolumeSpec",
+        "line": 71,
+        "end": 90,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "VolumeProgress",
+        "line": 94,
+        "end": 106,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "ProgressHint",
+        "line": 110,
+        "end": 120,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "ReviewProgress",
+        "line": 124,
+        "end": 143,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "volume_specs",
+        "line": 146,
+        "end": 155,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "count_dialogues",
+        "line": 158,
+        "end": 163,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "count_labeled",
+        "line": 166,
+        "end": 171,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "read_progress",
+        "line": 174,
+        "end": 178,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "parse_duration_seconds",
+        "line": 181,
+        "end": 191,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "format_eta",
+        "line": 194,
+        "end": 207,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "parse_progress_line",
+        "line": 210,
+        "end": 233,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "read_review_progress",
+        "line": 236,
+        "end": 259,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "read_recent_failure",
+        "line": 262,
+        "end": 284,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "child_python_executable",
+        "line": 287,
+        "end": 295,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "build_run_arguments",
+        "line": 298,
+        "end": 326,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "build_process_environment",
+        "line": 329,
+        "end": 354,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "runtime_files",
+        "line": 357,
+        "end": 372,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "unique_backup_directory",
+        "line": 375,
+        "end": 383,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_file_fingerprint",
+        "line": 386,
+        "end": 394,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_runtime_snapshot",
+        "line": 397,
+        "end": 401,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_latest_volume_backup",
+        "line": 404,
+        "end": 412,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_backup_snapshot",
+        "line": 415,
+        "end": 427,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "backup_volume",
+        "line": 430,
+        "end": 460,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "novel_path",
+        "line": 77,
+        "end": 78,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "answers_path",
+        "line": 81,
+        "end": 82,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "labeled_path",
+        "line": 85,
+        "end": 86,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "annotation_log_path",
+        "line": 89,
+        "end": 90,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "percent",
+        "line": 99,
+        "end": 102,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "complete",
+        "line": 105,
+        "end": 106,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "percent",
+        "line": 117,
+        "end": 120,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "percent",
+        "line": 132,
+        "end": 135,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "active",
+        "line": 138,
+        "end": 139,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "phase_label",
+        "line": 142,
+        "end": 143,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "src\\dialogue_ensemble.py",
+    "lines": 236,
+    "definitions": [
+      {
+        "name": "_compact_text",
+        "line": 18,
+        "end": 27,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "get_tag",
+        "line": 30,
+        "end": 33,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "parse_line_citations",
+        "line": 36,
+        "end": 45,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "build_dialogue_packet",
+        "line": 48,
+        "end": 123,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "format_dialogue_packet",
+        "line": 126,
+        "end": 199,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "packet_line_numbers",
+        "line": 202,
+        "end": 204,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "citations_are_local",
+        "line": 207,
+        "end": 210,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_find_dialogue_index",
+        "line": 213,
+        "end": 220,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_same_line_ordinal",
+        "line": 223,
+        "end": 225,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_narrative_between",
+        "line": 228,
+        "end": 236,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "src\\evidence_vault.py",
+    "lines": 140,
+    "definitions": [
+      {
+        "name": "EvidenceVault",
+        "line": 16,
+        "end": 140,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "__init__",
+        "line": 17,
+        "end": 19,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_load_or_init",
+        "line": 21,
+        "end": 28,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "save",
+        "line": 30,
+        "end": 37,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "add_evidence",
+        "line": 39,
+        "end": 65,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "update_last_seen",
+        "line": 67,
+        "end": 79,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "get_active_characters",
+        "line": 81,
+        "end": 87,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "resolve_alias",
+        "line": 89,
+        "end": 97,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "alias_status",
+        "line": 99,
+        "end": 107,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "get_state_text",
+        "line": 109,
+        "end": 129,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "get_character",
+        "line": 131,
+        "end": 133,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "has_character",
+        "line": 135,
+        "end": 137,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "all_characters",
+        "line": 139,
+        "end": 140,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "src\\get_dialogue.py",
+    "lines": 104,
+    "definitions": [
+      {
+        "name": "get_label_count",
+        "line": 16,
+        "end": 21,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "extract_dialogue_with_line_numbers",
+        "line": 24,
+        "end": 33,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "main",
+        "line": 36,
+        "end": 100,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "src\\inspect_log.py",
+    "lines": 44,
+    "definitions": []
+  },
+  {
+    "path": "src\\local_entity.py",
+    "lines": 283,
+    "definitions": [
+      {
+        "name": "speaker_key",
+        "line": 12,
+        "end": 15,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_UnionFind",
+        "line": 18,
+        "end": 34,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "LocalEntityConsensus",
+        "line": 38,
+        "end": 160,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "build_local_entity_consensus",
+        "line": 163,
+        "end": 283,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "__init__",
+        "line": 19,
+        "end": 20,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "find",
+        "line": 22,
+        "end": 26,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "union",
+        "line": 28,
+        "end": 34,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "empty",
+        "line": 53,
+        "end": 64,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_root",
+        "line": 66,
+        "end": 68,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "same_entity",
+        "line": 70,
+        "end": 81,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "labels_for",
+        "line": 83,
+        "end": 87,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "presence_support",
+        "line": 89,
+        "end": 90,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "citations_for",
+        "line": 92,
+        "end": 93,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "agent_count",
+        "line": 96,
+        "end": 97,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "assignment_support",
+        "line": 99,
+        "end": 101,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "competing_named_support",
+        "line": 103,
+        "end": 114,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "canonical_for",
+        "line": 116,
+        "end": 147,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "summary",
+        "line": 149,
+        "end": 160,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "src\\quote_occurrence.py",
+    "lines": 101,
+    "definitions": [
+      {
+        "name": "build_quote_occurrences",
+        "line": 17,
+        "end": 40,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "align_quote_occurrences",
+        "line": 43,
+        "end": 62,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "occurrence_context",
+        "line": 65,
+        "end": 80,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "contains_false_speech_phrase",
+        "line": 83,
+        "end": 85,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "format_occurrence_hint",
+        "line": 88,
+        "end": 101,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "src\\read_log.py",
+    "lines": 21,
+    "definitions": []
+  },
+  {
+    "path": "src\\run_label.py",
+    "lines": 5885,
+    "definitions": [
+      {
+        "name": "_env_int",
+        "line": 111,
+        "end": 115,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_env_float",
+        "line": 118,
+        "end": 122,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_resolve_workspace_path",
+        "line": 140,
+        "end": 146,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "configure_paths",
+        "line": 149,
+        "end": 187,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "ModelCallError",
+        "line": 190,
+        "end": 191,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "ApiModel",
+        "line": 194,
+        "end": 241,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "_model_context_limit",
+        "line": 247,
+        "end": 262,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_load_opencode_provider",
+        "line": 265,
+        "end": 275,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_extract_api_key_from_python",
+        "line": 278,
+        "end": 285,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_load_zhipu_key",
+        "line": 288,
+        "end": 303,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_read_key_file",
+        "line": 306,
+        "end": 310,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_load_agnes_key",
+        "line": 313,
+        "end": 326,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_load_sensenova_keys",
+        "line": 329,
+        "end": 346,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_suffix_name",
+        "line": 349,
+        "end": 350,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_append_sensenova_models",
+        "line": 353,
+        "end": 439,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_model_matches_priority",
+        "line": 442,
+        "end": 449,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_apply_api_priority",
+        "line": 452,
+        "end": 465,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_api_model_iteration_order",
+        "line": 468,
+        "end": 490,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_append_opencode_model",
+        "line": 493,
+        "end": 506,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_build_api_models",
+        "line": 509,
+        "end": 586,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_message_content",
+        "line": 589,
+        "end": 591,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_estimate_message_tokens",
+        "line": 594,
+        "end": 601,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_openai_messages",
+        "line": 604,
+        "end": 619,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_api_chat",
+        "line": 622,
+        "end": 664,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_health_check_model",
+        "line": 667,
+        "end": 694,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "init_api_fallback",
+        "line": 697,
+        "end": 768,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_expects_tool_call",
+        "line": 771,
+        "end": 786,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_coerce_text_tool_call",
+        "line": 789,
+        "end": 813,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_tool_names",
+        "line": 816,
+        "end": 817,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_infer_target_line_from_messages",
+        "line": 820,
+        "end": 829,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_fallback_required_tool_call",
+        "line": 832,
+        "end": 845,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_should_retry_model_error",
+        "line": 848,
+        "end": 876,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_should_failover_to_next_model",
+        "line": 879,
+        "end": 886,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_cooldown_for_model_error",
+        "line": 889,
+        "end": 900,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_is_transient_api_pool_error",
+        "line": 903,
+        "end": 931,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_api_pool_recovery_state",
+        "line": 934,
+        "end": 956,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_sleep_before_retry",
+        "line": 959,
+        "end": 963,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_extract_int_arg",
+        "line": 966,
+        "end": 970,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_extract_str_arg",
+        "line": 973,
+        "end": 980,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_repair_missing_commas",
+        "line": 983,
+        "end": 986,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "parse_tool_arguments",
+        "line": 989,
+        "end": 1038,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "normalize_tool_call",
+        "line": 1041,
+        "end": 1046,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "compact_text",
+        "line": 1049,
+        "end": 1061,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_call_api_fallback_once",
+        "line": 1064,
+        "end": 1308,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "call_api_fallback",
+        "line": 1311,
+        "end": 1367,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "search_forward_for_name",
+        "line": 1395,
+        "end": 1428,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_preview_text",
+        "line": 1435,
+        "end": 1439,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_message_trace_summary",
+        "line": 1442,
+        "end": 1464,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_trace_context",
+        "line": 1467,
+        "end": 1476,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "temp_log_event",
+        "line": 1479,
+        "end": 1495,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "set_current_round_trace",
+        "line": 1498,
+        "end": 1500,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "clear_current_round_trace",
+        "line": 1503,
+        "end": 1505,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "trace_tool_result",
+        "line": 1508,
+        "end": 1520,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "log_entry",
+        "line": 1523,
+        "end": 1525,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "new_round",
+        "line": 1528,
+        "end": 1539,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "log_agent",
+        "line": 1542,
+        "end": 1560,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "read_novel_lines",
+        "line": 1574,
+        "end": 1581,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "search_novel",
+        "line": 1584,
+        "end": 1610,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "get_narrative_before",
+        "line": 1613,
+        "end": 1626,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "deep_search_identity",
+        "line": 1629,
+        "end": 1668,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "find_all_references",
+        "line": 1671,
+        "end": 1689,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "build_context_index",
+        "line": 1692,
+        "end": 1735,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "get_dialogue_list",
+        "line": 1738,
+        "end": 1747,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "get_labeled_count",
+        "line": 1750,
+        "end": 1754,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "write_label",
+        "line": 1757,
+        "end": 1759,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "call_ollama",
+        "line": 1762,
+        "end": 1830,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "validate_char_name",
+        "line": 1948,
+        "end": 1980,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "is_valid_final_speaker",
+        "line": 1988,
+        "end": 1999,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "is_generic_speaker_label",
+        "line": 2038,
+        "end": 2051,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_clean_attribution_candidate",
+        "line": 2054,
+        "end": 2067,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_extract_attribution_candidates",
+        "line": 2070,
+        "end": 2104,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "analyze_local_evidence",
+        "line": 2107,
+        "end": 2153,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "format_local_evidence_hint",
+        "line": 2156,
+        "end": 2177,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "CharacterState",
+        "line": 2180,
+        "end": 2425,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "ShortMemAgent",
+        "line": 2432,
+        "end": 2600,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "FactCurator",
+        "line": 2607,
+        "end": 2657,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "LabelerAgent",
+        "line": 2664,
+        "end": 3069,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "VerifierAgent",
+        "line": 3076,
+        "end": 3312,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "QualityAudit",
+        "line": 3319,
+        "end": 4012,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "QualityEnsemble",
+        "line": 4019,
+        "end": 4409,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "Boss",
+        "line": 4416,
+        "end": 5111,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "_normalize_validation_label",
+        "line": 5118,
+        "end": 5127,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_is_generic_validation_label",
+        "line": 5130,
+        "end": 5138,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_load_verified_validation_identities",
+        "line": 5141,
+        "end": 5159,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_validation_lenient_match",
+        "line": 5162,
+        "end": 5203,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "validate",
+        "line": 5206,
+        "end": 5309,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_writeline",
+        "line": 5316,
+        "end": 5318,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "run_volume_second_pass",
+        "line": 5321,
+        "end": 5473,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "main",
+        "line": 5476,
+        "end": 5881,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "__init__",
+        "line": 195,
+        "end": 211,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "label",
+        "line": 214,
+        "end": 215,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "chat_url",
+        "line": 218,
+        "end": 223,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "wait_for_slot",
+        "line": 225,
+        "end": 228,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "mark_failure",
+        "line": 230,
+        "end": 234,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "available",
+        "line": 236,
+        "end": 241,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "__init__",
+        "line": 2183,
+        "end": 2184,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_load_or_init",
+        "line": 2186,
+        "end": 2196,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_is_valid_state",
+        "line": 2198,
+        "end": 2207,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "update_speech_order",
+        "line": 2209,
+        "end": 2219,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "get_recent_speakers_text",
+        "line": 2221,
+        "end": 2243,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "save",
+        "line": 2245,
+        "end": 2254,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "resolve_alias",
+        "line": 2256,
+        "end": 2264,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "add_character",
+        "line": 2266,
+        "end": 2282,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "update_character",
+        "line": 2284,
+        "end": 2299,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "add_alias",
+        "line": 2301,
+        "end": 2330,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "get_active_characters",
+        "line": 2332,
+        "end": 2339,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "get_state_text",
+        "line": 2341,
+        "end": 2363,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "get_scene_summary",
+        "line": 2365,
+        "end": 2375,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "parse_state_update",
+        "line": 2377,
+        "end": 2425,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "__init__",
+        "line": 2433,
+        "end": 2437,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "update",
+        "line": 2439,
+        "end": 2446,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_confirmed_history",
+        "line": 2448,
+        "end": 2452,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_rhythm_speaker",
+        "line": 2454,
+        "end": 2460,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "detect_rapid_exchange",
+        "line": 2462,
+        "end": 2473,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_get_exchange_rhythm",
+        "line": 2475,
+        "end": 2518,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "get_next_expected",
+        "line": 2520,
+        "end": 2523,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "get_confirmed_summary",
+        "line": 2525,
+        "end": 2533,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "get_recent_speakers_hint",
+        "line": 2535,
+        "end": 2554,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "get_summary",
+        "line": 2556,
+        "end": 2585,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_alternating_pair_name",
+        "line": 2587,
+        "end": 2600,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "__init__",
+        "line": 2610,
+        "end": 2614,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "add_round",
+        "line": 2616,
+        "end": 2617,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "should_curate",
+        "line": 2619,
+        "end": 2620,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "curate",
+        "line": 2622,
+        "end": 2654,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "get_summary",
+        "line": 2656,
+        "end": 2657,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "__init__",
+        "line": 2665,
+        "end": 2666,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "label",
+        "line": 2668,
+        "end": 3017,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_parse_tag",
+        "line": 3019,
+        "end": 3021,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_is_garbage_speaker",
+        "line": 3023,
+        "end": 3036,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_parse_answer",
+        "line": 3038,
+        "end": 3057,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_parse_summary",
+        "line": 3059,
+        "end": 3063,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_parse_reason",
+        "line": 3065,
+        "end": 3069,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "__init__",
+        "line": 3084,
+        "end": 3085,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_safe_print",
+        "line": 3087,
+        "end": 3092,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "verify",
+        "line": 3094,
+        "end": 3312,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "__init__",
+        "line": 3339,
+        "end": 3342,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_same_speaker",
+        "line": 3345,
+        "end": 3346,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_preferred_consensus_label",
+        "line": 3349,
+        "end": 3357,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_speaker_vote_consensus",
+        "line": 3360,
+        "end": 3374,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_parse_card",
+        "line": 3376,
+        "end": 3393,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_card_from_tool_args",
+        "line": 3396,
+        "end": 3424,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_card_is_valid",
+        "line": 3426,
+        "end": 3437,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_normalize_card_consistency",
+        "line": 3440,
+        "end": 3453,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_run_xml_agent",
+        "line": 3455,
+        "end": 3525,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_quote_output_format",
+        "line": 3528,
+        "end": 3532,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_speaker_output_format",
+        "line": 3535,
+        "end": 3540,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_select_decision",
+        "line": 3542,
+        "end": 3692,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_apply_split_neighbor_result",
+        "line": 3695,
+        "end": 3724,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "decide",
+        "line": 3726,
+        "end": 4012,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "__init__",
+        "line": 4026,
+        "end": 4029,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_run_agent",
+        "line": 4031,
+        "end": 4104,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_quality_output_tool",
+        "line": 4107,
+        "end": 4110,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_extract_quality_tool_args",
+        "line": 4113,
+        "end": 4121,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_tool_args_to_tag_text",
+        "line": 4124,
+        "end": 4140,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_parse_card",
+        "line": 4142,
+        "end": 4161,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_same_speaker",
+        "line": 4164,
+        "end": 4165,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_confidence_is_high",
+        "line": 4168,
+        "end": 4169,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_card_has_local_citation",
+        "line": 4171,
+        "end": 4172,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_select_decision",
+        "line": 4174,
+        "end": 4249,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "decide",
+        "line": 4251,
+        "end": 4409,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "__init__",
+        "line": 4417,
+        "end": 4477,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_canonicalize_verified_alias",
+        "line": 4479,
+        "end": 4486,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_find_dialogue_index",
+        "line": 4488,
+        "end": 4496,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_local_dialogue_structure",
+        "line": 4498,
+        "end": 4540,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_format_structure_hint",
+        "line": 4542,
+        "end": 4579,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_build_navigation",
+        "line": 4581,
+        "end": 4611,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_safe_print",
+        "line": 4613,
+        "end": 4619,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_is_short_or_fragment",
+        "line": 4621,
+        "end": 4624,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_label_matches_local_candidates",
+        "line": 4626,
+        "end": 4638,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_risk_reasons",
+        "line": 4640,
+        "end": 4691,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_is_concrete_speaker",
+        "line": 4693,
+        "end": 4695,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_should_apply_verifier_change",
+        "line": 4697,
+        "end": 4772,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "process_one",
+        "line": 4774,
+        "end": 5111,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "canonicalize",
+        "line": 5327,
+        "end": 5332,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "same_with_verified_alias",
+        "line": 5334,
+        "end": 5345,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "format_review_duration",
+        "line": 5347,
+        "end": 5353,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "review_progress",
+        "line": 5355,
+        "end": 5404,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "call_review_model",
+        "line": 5406,
+        "end": 5430,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "fmt_duration",
+        "line": 5767,
+        "end": 5773,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "report_heartbeat",
+        "line": 5412,
+        "end": 5417,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "src\\scene_quality.py",
+    "lines": 2970,
+    "definitions": [
+      {
+        "name": "SceneQualityRuntime",
+        "line": 248,
+        "end": 270,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "SceneSequenceAudit",
+        "line": 273,
+        "end": 2970,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "__init__",
+        "line": 276,
+        "end": 299,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "decide",
+        "line": 301,
+        "end": 574,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_solve_scene",
+        "line": 576,
+        "end": 666,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_run_required_tool",
+        "line": 668,
+        "end": 774,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_run_investigator",
+        "line": 776,
+        "end": 1049,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_run_verdict",
+        "line": 1051,
+        "end": 1106,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_run_contrastive_boundary",
+        "line": 1108,
+        "end": 1407,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_format_boundary_constraints",
+        "line": 1409,
+        "end": 1487,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_contact_verbs_for_speaker",
+        "line": 1490,
+        "end": 1505,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_baseline_scope_conflict",
+        "line": 1507,
+        "end": 1594,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_scope_repair_consensus",
+        "line": 1596,
+        "end": 1675,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_contrastive_candidate_pair",
+        "line": 1677,
+        "end": 1732,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_neighboring_scene_candidates",
+        "line": 1734,
+        "end": 1779,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_normalize_boundary_brief",
+        "line": 1782,
+        "end": 1807,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_normalize_boundary_jury",
+        "line": 1810,
+        "end": 1841,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_invalid_boundary_brief",
+        "line": 1844,
+        "end": 1854,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_invalid_boundary_jury",
+        "line": 1857,
+        "end": 1870,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_select_decision",
+        "line": 1872,
+        "end": 2436,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_target_scene_cards",
+        "line": 2438,
+        "end": 2455,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_build_evidence_cases",
+        "line": 2457,
+        "end": 2494,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_neutralize_cases",
+        "line": 2496,
+        "end": 2536,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_neutralize_scene_sequences",
+        "line": 2538,
+        "end": 2587,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_format_neutral_cases",
+        "line": 2590,
+        "end": 2601,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_format_neutral_sequences",
+        "line": 2604,
+        "end": 2619,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_normalize_target_card",
+        "line": 2621,
+        "end": 2650,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_normalize_verdict",
+        "line": 2652,
+        "end": 2684,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_compact_messages",
+        "line": 2686,
+        "end": 2724,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_map_speaker",
+        "line": 2726,
+        "end": 2730,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_scene_person_consensus",
+        "line": 2732,
+        "end": 2762,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_has_direct_speech_binding",
+        "line": 2765,
+        "end": 2802,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_has_conveyed_quote_binding",
+        "line": 2805,
+        "end": 2829,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_has_adjacent_non_speech_mention",
+        "line": 2832,
+        "end": 2858,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_has_nonperson_quote_container",
+        "line": 2861,
+        "end": 2874,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_has_partial_spoken_quote_container",
+        "line": 2877,
+        "end": 2890,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_has_person_vocalization_binding",
+        "line": 2893,
+        "end": 2911,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_int_list",
+        "line": 2914,
+        "end": 2925,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_unresolved_card",
+        "line": 2928,
+        "end": 2940,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_unresolved_verdict",
+        "line": 2943,
+        "end": 2956,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_apply_verdict_fields",
+        "line": 2959,
+        "end": 2970,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "validator",
+        "line": 1092,
+        "end": 1094,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "turn_label",
+        "line": 1434,
+        "end": 1438,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "has_speech_binding",
+        "line": 1445,
+        "end": 1446,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "add",
+        "line": 1606,
+        "end": 1638,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "add",
+        "line": 1687,
+        "end": 1704,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "validator",
+        "line": 636,
+        "end": 642,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "validator",
+        "line": 1179,
+        "end": 1184,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "validator",
+        "line": 1252,
+        "end": 1257,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "validator",
+        "line": 1337,
+        "end": 1342,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "src\\scene_sequence.py",
+    "lines": 426,
+    "definitions": [
+      {
+        "name": "build_scene_segments",
+        "line": 21,
+        "end": 89,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "build_scene_packet",
+        "line": 92,
+        "end": 144,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "find_scene_for_dialogue",
+        "line": 147,
+        "end": 155,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "format_scene_packet",
+        "line": 158,
+        "end": 212,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "normalize_scene_assignments",
+        "line": 215,
+        "end": 286,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "assignment_for_dialogue",
+        "line": 289,
+        "end": 298,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_boundary_info",
+        "line": 301,
+        "end": 328,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_split_oversized_chunk",
+        "line": 331,
+        "end": 369,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_narrative_between",
+        "line": 372,
+        "end": 384,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_looks_like_heading",
+        "line": 387,
+        "end": 389,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_same_line_ordinal",
+        "line": 392,
+        "end": 394,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_target_preserving_compact",
+        "line": 397,
+        "end": 426,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "src\\search_agent.py",
+    "lines": 325,
+    "definitions": [
+      {
+        "name": "SearchAgent",
+        "line": 57,
+        "end": 325,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "__init__",
+        "line": 58,
+        "end": 63,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_safe_print",
+        "line": 65,
+        "end": 72,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "investigate",
+        "line": 74,
+        "end": 308,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_parse_result",
+        "line": 310,
+        "end": 325,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "src\\sensenova_pool.py",
+    "lines": 131,
+    "definitions": [
+      {
+        "name": "SenseNovaPoolConfig",
+        "line": 20,
+        "end": 29,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "SenseNovaPoolStatus",
+        "line": 33,
+        "end": 39,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "_enabled",
+        "line": 42,
+        "end": 44,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_load_opencode_provider",
+        "line": 47,
+        "end": 55,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "load_sensenova_pool_config",
+        "line": 58,
+        "end": 96,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "probe_sensenova_pool",
+        "line": 99,
+        "end": 131,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "health_url",
+        "line": 27,
+        "end": 29,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "src\\validate.py",
+    "lines": 87,
+    "definitions": [
+      {
+        "name": "parse_answers",
+        "line": 23,
+        "end": 29,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "parse_labels",
+        "line": 32,
+        "end": 34,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "main",
+        "line": 37,
+        "end": 83,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "src\\validate_fixed.py",
+    "lines": 57,
+    "definitions": []
+  },
+  {
+    "path": "src\\volume_review.py",
+    "lines": 3310,
+    "definitions": [
+      {
+        "name": "VolumeReviewRuntime",
+        "line": 372,
+        "end": 385,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "_sha256_file",
+        "line": 388,
+        "end": 396,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_append_jsonl",
+        "line": 399,
+        "end": 404,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_write_json_atomic",
+        "line": 407,
+        "end": 424,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_load_json",
+        "line": 427,
+        "end": 433,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_load_jsonl",
+        "line": 436,
+        "end": 449,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "build_review_units",
+        "line": 452,
+        "end": 475,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "build_scene_review_units",
+        "line": 478,
+        "end": 509,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_report_is_strong",
+        "line": 512,
+        "end": 517,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_has_local_speaker_binding",
+        "line": 520,
+        "end": 562,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "derive_deterministic_sequence_constraints",
+        "line": 565,
+        "end": 688,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_clip",
+        "line": 691,
+        "end": 695,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_json_values_from_text",
+        "line": 698,
+        "end": 732,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_structured_payloads_from_text",
+        "line": 735,
+        "end": 770,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_compact_single_target_task",
+        "line": 773,
+        "end": 826,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_normalize_quote_type",
+        "line": 829,
+        "end": 841,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_normalize_evidence_basis",
+        "line": 844,
+        "end": 858,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_verified_identity_text",
+        "line": 861,
+        "end": 877,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "format_review_packet",
+        "line": 880,
+        "end": 950,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "VolumeSecondPassReviewer",
+        "line": 953,
+        "end": 3310,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "__init__",
+        "line": 956,
+        "end": 984,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_emit_progress",
+        "line": 986,
+        "end": 994,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_checkpoint_progress",
+        "line": 996,
+        "end": 1003,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_run_resilient_task",
+        "line": 1005,
+        "end": 1080,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_fingerprint",
+        "line": 1082,
+        "end": 1091,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_prepare_run",
+        "line": 1093,
+        "end": 1128,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_call_structured",
+        "line": 1130,
+        "end": 1437,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_recover_assignments_individually",
+        "line": 1439,
+        "end": 1579,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_recover_verdict_compactly",
+        "line": 1581,
+        "end": 1888,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_validate_assignments",
+        "line": 1890,
+        "end": 1946,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_validate_scene_entity_graph",
+        "line": 1948,
+        "end": 2143,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_validate_verdict",
+        "line": 2145,
+        "end": 2183,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_group_reports",
+        "line": 2185,
+        "end": 2216,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_supported_alternative_groups",
+        "line": 2218,
+        "end": 2309,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_assess_mirrored_jury",
+        "line": 2311,
+        "end": 2372,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_transition_gate",
+        "line": 2374,
+        "end": 2547,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_jury_comparison_prompt",
+        "line": 2550,
+        "end": 2573,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_review_system_prompt",
+        "line": 2575,
+        "end": 2591,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_entity_graph_system_prompt",
+        "line": 2593,
+        "end": 2608,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_jury_system_prompt",
+        "line": 2610,
+        "end": 2616,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "run",
+        "line": 2618,
+        "end": 3310,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "validate_payloads",
+        "line": 1161,
+        "end": 1171,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "local_citations",
+        "line": 1966,
+        "end": 1975,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "appears_on_cited_line",
+        "line": 1977,
+        "end": 1982,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "src\\write_label.py",
+    "lines": 37,
+    "definitions": [
+      {
+        "name": "main",
+        "line": 15,
+        "end": 33,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "tests\\test_atomic_file.py",
+    "lines": 77,
+    "definitions": [
+      {
+        "name": "AtomicFileTests",
+        "line": 17,
+        "end": 77,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "test_checkpoint_survives_actual_windows_reader_lock",
+        "line": 19,
+        "end": 44,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_permanent_lock_keeps_old_and_new_versions",
+        "line": 46,
+        "end": 60,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_non_lock_errors_are_not_retried",
+        "line": 62,
+        "end": 68,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_failed_serialization_does_not_damage_checkpoint",
+        "line": 70,
+        "end": 77,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "tests\\test_control_center_core.py",
+    "lines": 200,
+    "definitions": [
+      {
+        "name": "ControlCenterCoreTests",
+        "line": 29,
+        "end": 196,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "test_project_root_search_skips_empty_nested_data_directory",
+        "line": 30,
+        "end": 40,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_volume_specs_use_root_data_for_first_volume",
+        "line": 42,
+        "end": 46,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_progress_matches_dialogue_and_label_line_counts",
+        "line": 48,
+        "end": 60,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_continue_and_reset_arguments_are_distinct",
+        "line": 62,
+        "end": 69,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_packaged_arguments_reenter_executable_worker",
+        "line": 71,
+        "end": 77,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_first_pass_and_review_eta_lines_are_parsed",
+        "line": 79,
+        "end": 92,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_eta_duration_formatting",
+        "line": 94,
+        "end": 99,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_review_progress_reads_durable_checkpoint",
+        "line": 101,
+        "end": 114,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_process_environment_uses_selected_key_file_and_direct_connections",
+        "line": 116,
+        "end": 128,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_process_environment_can_use_pool_without_a_key_file",
+        "line": 130,
+        "end": 140,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_backup_copies_runtime_files_without_moving_sources",
+        "line": 142,
+        "end": 162,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_unchanged_volume_is_not_backed_up_twice",
+        "line": 164,
+        "end": 184,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_recent_failure_reads_last_transaction_event",
+        "line": 186,
+        "end": 196,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "tests\\test_dialogue_ensemble.py",
+    "lines": 730,
+    "definitions": [
+      {
+        "name": "DialoguePacketTests",
+        "line": 31,
+        "end": 68,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "QualityDecisionTests",
+        "line": 71,
+        "end": 122,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "BaselinePreservingAuditTests",
+        "line": 125,
+        "end": 277,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "ApiFallbackTests",
+        "line": 280,
+        "end": 726,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "setUp",
+        "line": 32,
+        "end": 43,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_packet_marks_the_exact_target_turn",
+        "line": 45,
+        "end": 52,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_only_packet_lines_are_accepted_as_citations",
+        "line": 54,
+        "end": 59,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_truncation_keeps_the_target_raw_line_visible",
+        "line": 61,
+        "end": 68,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "setUp",
+        "line": 72,
+        "end": 79,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_weak_arbiter_cannot_override_cited_blind_consensus",
+        "line": 81,
+        "end": 99,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_only_confirmed_memory_can_supply_an_exchange_hint",
+        "line": 101,
+        "end": 114,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_each_quality_role_has_its_own_required_tool_fields",
+        "line": 116,
+        "end": 122,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "setUp",
+        "line": 126,
+        "end": 128,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "quote_card",
+        "line": 131,
+        "end": 138,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "speaker_card",
+        "line": 141,
+        "end": 149,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "select",
+        "line": 151,
+        "end": 159,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_nonperson_requires_quote_and_attribution_support",
+        "line": 161,
+        "end": 167,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_final_nonperson_alone_cannot_override_baseline",
+        "line": 169,
+        "end": 175,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_speaker_change_requires_all_scene_audits_and_final_judge",
+        "line": 177,
+        "end": 186,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_joint_panel_can_correct_with_two_final_and_three_scene_votes",
+        "line": 188,
+        "end": 197,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_strong_local_panel_can_correct_named_speaker_without_final_support",
+        "line": 199,
+        "end": 208,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_explicit_five_vote_attribution_can_restore_person_from_nonperson",
+        "line": 210,
+        "end": 223,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_two_neighbor_anchor_votes_can_resolve_three_vote_plurality",
+        "line": 225,
+        "end": 249,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_untranslated_and_protocol_labels_are_rejected",
+        "line": 251,
+        "end": 255,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_non_speech_reason_overrides_contradictory_person_field",
+        "line": 257,
+        "end": 277,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_sensenova_pool_uses_every_configured_key",
+        "line": 281,
+        "end": 340,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_local_sensenova_proxy_replaces_cached_direct_key_pool",
+        "line": 342,
+        "end": 371,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_sensenova_key_file_does_not_require_opencode_provider",
+        "line": 373,
+        "end": 394,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_combined_quality_filter_keeps_sensenova_then_all_agnes_models",
+        "line": 396,
+        "end": 432,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_combined_quality_filter_keeps_sensenova_then_all_agnes_models",
+        "line": 434,
+        "end": 474,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_context_limit_uses_native_window_unless_explicitly_overridden",
+        "line": 476,
+        "end": 494,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_round_robin_timeout_fails_over_instead_of_retrying_same_key",
+        "line": 496,
+        "end": 513,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_transient_pool_cooldown_waits_then_retries",
+        "line": 515,
+        "end": 553,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_transient_pool_retries_member_that_just_left_cooldown",
+        "line": 555,
+        "end": 597,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_non_transient_pool_failure_does_not_wait",
+        "line": 599,
+        "end": 621,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_missing_required_tool_moves_to_next_round_robin_key",
+        "line": 623,
+        "end": 675,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_structured_caller_can_receive_prose_for_correction_round",
+        "line": 677,
+        "end": 726,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "finish_cooldown",
+        "line": 530,
+        "end": 531,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "fake_chat",
+        "line": 640,
+        "end": 648,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "fake_chat",
+        "line": 694,
+        "end": 696,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "tests\\test_local_entity.py",
+    "lines": 121,
+    "definitions": [
+      {
+        "name": "graph_record",
+        "line": 13,
+        "end": 17,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "entity",
+        "line": 20,
+        "end": 26,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "assignment",
+        "line": 29,
+        "end": 30,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "LocalEntityConsensusTests",
+        "line": 33,
+        "end": 117,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "build",
+        "line": 34,
+        "end": 40,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_two_of_three_graphs_merge_source_aliases",
+        "line": 42,
+        "end": 68,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_rendering_preserves_baseline_for_same_local_entity",
+        "line": 70,
+        "end": 84,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_rendering_upgrades_role_to_source_grounded_name",
+        "line": 86,
+        "end": 100,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_competing_named_assignment_is_counted_separately",
+        "line": 102,
+        "end": 117,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "tests\\test_quote_occurrence.py",
+    "lines": 46,
+    "definitions": [
+      {
+        "name": "QuoteOccurrenceTests",
+        "line": 17,
+        "end": 42,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "test_multiple_quotes_on_one_line_keep_independent_scope",
+        "line": 18,
+        "end": 30,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_alignment_detects_divergent_extraction",
+        "line": 32,
+        "end": 37,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_rhetorical_speech_phrases_are_not_attributions",
+        "line": 39,
+        "end": 42,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "tests\\test_quote_scope.py",
+    "lines": 127,
+    "definitions": [
+      {
+        "name": "QuoteScopeHintTests",
+        "line": 13,
+        "end": 80,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "ValidationIdentityTests",
+        "line": 83,
+        "end": 123,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "test_non_colon_intervening_attribution_defaults_to_previous_quote",
+        "line": 14,
+        "end": 26,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_colon_intervening_attribution_may_introduce_target",
+        "line": 28,
+        "end": 40,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_comparative_phrase_is_not_extracted_as_a_speaker",
+        "line": 42,
+        "end": 47,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_dialogue_contact_verb_is_recognized",
+        "line": 49,
+        "end": 53,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_inability_to_speak_is_not_an_attribution",
+        "line": 55,
+        "end": 58,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_inverted_contact_attribution_uses_post_verbal_subject",
+        "line": 60,
+        "end": 63,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_long_contact_clause_keeps_leading_subject",
+        "line": 65,
+        "end": 70,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_rhetorical_question_is_not_extracted_as_a_speaker",
+        "line": 72,
+        "end": 75,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_descriptive_inability_is_not_extracted_as_a_speaker",
+        "line": 77,
+        "end": 80,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_verified_role_answer_may_upgrade_to_name",
+        "line": 84,
+        "end": 95,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_verified_name_answer_cannot_downgrade_to_role",
+        "line": 97,
+        "end": 107,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_organization_role_may_use_more_or_less_specific_generic_label",
+        "line": 109,
+        "end": 115,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_generic_answer_may_upgrade_to_contained_personal_name",
+        "line": 117,
+        "end": 123,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "tests\\test_scene_quality.py",
+    "lines": 1443,
+    "definitions": [
+      {
+        "name": "_validate_speaker",
+        "line": 19,
+        "end": 21,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_same_speaker",
+        "line": 24,
+        "end": 25,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_unused",
+        "line": 28,
+        "end": 29,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "SceneSelectionTests",
+        "line": 32,
+        "end": 1076,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "MessageCompactionTests",
+        "line": 1079,
+        "end": 1120,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "RequiredToolFailureTests",
+        "line": 1123,
+        "end": 1329,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "SceneCacheTests",
+        "line": 1332,
+        "end": 1439,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "setUp",
+        "line": 33,
+        "end": 68,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_final_verdict_requires_quote_type",
+        "line": 70,
+        "end": 74,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "scene_card",
+        "line": 77,
+        "end": 84,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "investigation",
+        "line": 87,
+        "end": 103,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "verdict",
+        "line": 106,
+        "end": 125,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "contrastive",
+        "line": 128,
+        "end": 149,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "select",
+        "line": 151,
+        "end": 162,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "select_conservative",
+        "line": 164,
+        "end": 175,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_default_policy_retains_valid_baseline_against_model_consensus",
+        "line": 177,
+        "end": 193,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_default_policy_can_replace_an_invalid_baseline",
+        "line": 195,
+        "end": 205,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_default_policy_does_not_confirm_model_only_baseline_agreement",
+        "line": 207,
+        "end": 220,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_dialogue_contact_verb_creates_previous_quote_scope_constraint",
+        "line": 222,
+        "end": 237,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_inability_to_speak_does_not_create_scope_constraint",
+        "line": 239,
+        "end": 254,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_contact_subject_detection_does_not_treat_addressee_as_speaker",
+        "line": 256,
+        "end": 264,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_contact_subject_detection_handles_long_subject_action_clause",
+        "line": 266,
+        "end": 272,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_scope_conflict_logs_cross_role_consensus_without_overriding",
+        "line": 274,
+        "end": 315,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_contact_scope_conflict_requires_dedicated_repair_agents",
+        "line": 317,
+        "end": 355,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_contact_scope_conflict_can_use_dedicated_repair_consensus",
+        "line": 357,
+        "end": 397,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_scope_conflict_without_cross_role_consensus_keeps_baseline",
+        "line": 399,
+        "end": 432,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_boundary_tools_require_explicit_weakness_and_relations",
+        "line": 434,
+        "end": 440,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_unanimous_mirrored_boundary_jury_can_override_correlated_majority",
+        "line": 442,
+        "end": 457,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_boundary_jury_disagreement_cannot_override",
+        "line": 459,
+        "end": 470,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_disagreement_referees_require_independent_scene_support",
+        "line": 472,
+        "end": 493,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_generic_role_and_named_identity_skip_boundary_debate",
+        "line": 495,
+        "end": 512,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_neighboring_scene_speaker_can_seed_missing_contrastive_candidate",
+        "line": 514,
+        "end": 523,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_neighboring_scene_candidates_use_packet_id_field",
+        "line": 525,
+        "end": 551,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_boundary_jury_cannot_overrule_a_direct_anchor",
+        "line": 553,
+        "end": 563,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_scene_majority_cannot_override_a_weak_verdict",
+        "line": 565,
+        "end": 574,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_direct_binding_can_override_with_independent_confirmation",
+        "line": 576,
+        "end": 585,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_previous_quote_post_attribution_cannot_bind_next_quote",
+        "line": 587,
+        "end": 602,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_boundary_constraints_consume_previous_post_attribution",
+        "line": 604,
+        "end": 627,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_preceding_attribution_with_colon_can_bind_next_quote",
+        "line": 629,
+        "end": 640,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_named_expression_conveying_quote_restores_person",
+        "line": 642,
+        "end": 672,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_named_demeanor_container_conveying_quote_restores_person",
+        "line": 674,
+        "end": 694,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_adjacent_action_cannot_masquerade_as_direct_attribution",
+        "line": 696,
+        "end": 710,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_adjacent_action_ambiguity_blocks_a_pure_sequence_override",
+        "line": 712,
+        "end": 734,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_unspoken_container_can_override_a_person_baseline",
+        "line": 736,
+        "end": 763,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_partially_spoken_quote_is_not_an_unspoken_container",
+        "line": 765,
+        "end": 774,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_started_speech_restores_person_against_nonperson_verdict",
+        "line": 776,
+        "end": 804,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_named_person_vocalization_restores_person_label",
+        "line": 806,
+        "end": 834,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_verified_identity_can_replace_a_generic_role",
+        "line": 836,
+        "end": 845,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_sequence_override_requires_two_maps_and_two_investigations",
+        "line": 847,
+        "end": 870,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_unanimous_scene_plus_one_independent_investigation_can_override",
+        "line": 872,
+        "end": 888,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_three_independent_investigations_can_recover_missing_scene_candidate",
+        "line": 890,
+        "end": 907,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_scene_chain_can_override_an_unresolved_judge",
+        "line": 909,
+        "end": 925,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_four_of_five_scene_maps_can_override_random_baseline",
+        "line": 927,
+        "end": 942,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_three_of_five_with_reverse_decoder_can_override_random_baseline",
+        "line": 944,
+        "end": 961,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_three_of_five_without_specialized_decoder_retains_baseline",
+        "line": 963,
+        "end": 978,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_three_scene_maps_plus_blind_investigation_can_override",
+        "line": 980,
+        "end": 997,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_unanimous_generic_scene_role_can_be_canonicalized_by_two_identity_reports",
+        "line": 999,
+        "end": 1015,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_scene_chain_does_not_override_adjacent_action_ambiguity",
+        "line": 1017,
+        "end": 1037,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_unresolved_verdict_retains_valid_baseline",
+        "line": 1039,
+        "end": 1048,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_matching_verdict_is_an_anchor_only_when_level_and_basis_agree",
+        "line": 1050,
+        "end": 1065,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_resolved_verdict_replaces_an_invalid_baseline",
+        "line": 1067,
+        "end": 1076,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_compaction_never_leaves_an_orphan_tool_message",
+        "line": 1080,
+        "end": 1120,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_exhausted_model_pool_returns_invalid_result_instead_of_raising",
+        "line": 1124,
+        "end": 1165,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_investigator_pool_failure_returns_unresolved",
+        "line": 1167,
+        "end": 1209,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_investigator_forces_structured_submission_after_empty_tool_round",
+        "line": 1211,
+        "end": 1278,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_investigator_does_not_repeat_exhausted_forced_submission",
+        "line": 1280,
+        "end": 1329,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_scene_maps_are_solved_once_and_later_targets_reference_the_cache",
+        "line": 1333,
+        "end": 1388,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_identical_scene_sequences_are_hidden_as_one_hypothesis",
+        "line": 1390,
+        "end": 1439,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "fail_model",
+        "line": 1127,
+        "end": 1129,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "fail_model",
+        "line": 1170,
+        "end": 1172,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "call_model",
+        "line": 1225,
+        "end": 1234,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "call_model",
+        "line": 1283,
+        "end": 1287,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "solve_scene",
+        "line": 1359,
+        "end": 1374,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "assignments",
+        "line": 1414,
+        "end": 1424,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "tests\\test_scene_sequence.py",
+    "lines": 117,
+    "definitions": [
+      {
+        "name": "SceneSegmentationTests",
+        "line": 20,
+        "end": 55,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "ScenePacketTests",
+        "line": 58,
+        "end": 113,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "test_every_target_in_a_segment_resolves_to_the_same_scene",
+        "line": 21,
+        "end": 31,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_heading_creates_a_strong_scene_boundary",
+        "line": 33,
+        "end": 42,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_oversized_scene_is_split_at_a_stable_boundary",
+        "line": 44,
+        "end": 55,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "setUp",
+        "line": 59,
+        "end": 63,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_speaker",
+        "line": 66,
+        "end": 67,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_packet_preserves_same_line_occurrence_and_target",
+        "line": 69,
+        "end": 78,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_complete_scene_map_is_normalized",
+        "line": 80,
+        "end": 98,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_map_rejects_missing_turn_and_nonlocal_citation",
+        "line": 100,
+        "end": 113,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "tests\\test_search_agent.py",
+    "lines": 135,
+    "definitions": [
+      {
+        "name": "SearchAgentTests",
+        "line": 13,
+        "end": 131,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "test_identity_search_enforces_long_forward_window",
+        "line": 14,
+        "end": 64,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_max_rounds_forces_structured_identity_submission",
+        "line": 66,
+        "end": 131,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "call_model",
+        "line": 18,
+        "end": 41,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "deep_search",
+        "line": 43,
+        "end": 47,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "call_model",
+        "line": 69,
+        "end": 112,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "tests\\test_sensenova_pool.py",
+    "lines": 87,
+    "definitions": [
+      {
+        "name": "SenseNovaPoolConfigTests",
+        "line": 18,
+        "end": 83,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "test_loads_pool_provider_from_opencode_config",
+        "line": 19,
+        "end": 46,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_environment_can_disable_configured_pool",
+        "line": 48,
+        "end": 71,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_explicit_enable_uses_safe_local_defaults_without_opencode",
+        "line": 73,
+        "end": 83,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "tests\\test_volume_review.py",
+    "lines": 1158,
+    "definitions": [
+      {
+        "name": "valid_speaker",
+        "line": 28,
+        "end": 30,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "FakeModel",
+        "line": 33,
+        "end": 140,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "AlwaysFailModel",
+        "line": 143,
+        "end": 146,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "InterruptingModel",
+        "line": 149,
+        "end": 152,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "ProseThenToolModel",
+        "line": 155,
+        "end": 161,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "ProseVerdictThenCompactModel",
+        "line": 164,
+        "end": 169,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "ProseVerdictWithJsonCompilerModel",
+        "line": 172,
+        "end": 190,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "FailOnSecondRecoveryTargetModel",
+        "line": 193,
+        "end": 201,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "runtime_for",
+        "line": 204,
+        "end": 217,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "strong_verdict",
+        "line": 220,
+        "end": 229,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "mirrored_records",
+        "line": 232,
+        "end": 244,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "VolumeReviewStructureTests",
+        "line": 247,
+        "end": 420,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "VolumeReviewDecisionGateTests",
+        "line": 423,
+        "end": 816,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "VolumeReviewRunTests",
+        "line": 819,
+        "end": 1154,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "__init__",
+        "line": 34,
+        "end": 36,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "__call__",
+        "line": 38,
+        "end": 140,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "__call__",
+        "line": 144,
+        "end": 146,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "__call__",
+        "line": 150,
+        "end": 152,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "__call__",
+        "line": 156,
+        "end": 161,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "__call__",
+        "line": 165,
+        "end": 169,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "__call__",
+        "line": 173,
+        "end": 190,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "__call__",
+        "line": 194,
+        "end": 201,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_json_extractor_does_not_promote_nested_citation_arrays",
+        "line": 248,
+        "end": 264,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_review_units_overlap_context_but_not_focus",
+        "line": 266,
+        "end": 272,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_scene_review_units_split_at_a_strong_narrative_gap",
+        "line": 274,
+        "end": 290,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_packet_marks_exact_focus_and_provisional_visibility",
+        "line": 292,
+        "end": 309,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_local_entity_graph_requires_every_alias_to_be_source_grounded",
+        "line": 311,
+        "end": 366,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_hesitation_before_other_self_introduction_keeps_prior_floor",
+        "line": 368,
+        "end": 390,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_departure_farewell_is_assigned_to_other_party",
+        "line": 392,
+        "end": 420,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "make_reviewer",
+        "line": 424,
+        "end": 434,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_mirrored_jury_rejects_order_unstable_support",
+        "line": 436,
+        "end": 457,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_three_of_four_stable_mirrored_roles_can_pass",
+        "line": 459,
+        "end": 477,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_named_to_generic_requires_all_pairs_and_direct_binding",
+        "line": 479,
+        "end": 537,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_named_to_generic_accepts_direct_binding_through_local_alias",
+        "line": 539,
+        "end": 573,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_unanimous_local_entity_map_relaxes_one_mirrored_pair",
+        "line": 575,
+        "end": 616,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_independent_panel_can_override_two_stable_candidate_juries",
+        "line": 618,
+        "end": 677,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_local_entity_conflict_blocks_unsupported_named_candidate",
+        "line": 679,
+        "end": 712,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_generic_relabel_requires_unanimous_local_direct_binding",
+        "line": 714,
+        "end": 758,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_nonperson_change_requires_both_boundary_specialists",
+        "line": 760,
+        "end": 816,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "make_reviewer",
+        "line": 820,
+        "end": 835,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_full_review_is_atomic_and_idempotent",
+        "line": 837,
+        "end": 866,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_review_reports_durable_phase_progress",
+        "line": 868,
+        "end": 902,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_unanimous_review_and_jury_can_rewrite",
+        "line": 904,
+        "end": 921,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_interrupted_review_never_overwrites_first_pass_labels",
+        "line": 923,
+        "end": 947,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_permanently_bad_reviewer_abstains_without_aborting_volume",
+        "line": 949,
+        "end": 973,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_split_batch_resume_reuses_completed_single_items",
+        "line": 975,
+        "end": 1035,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_failed_batch_is_recovered_by_single_target_review",
+        "line": 1037,
+        "end": 1065,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_failed_single_verdict_is_recovered_with_compact_context",
+        "line": 1067,
+        "end": 1109,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "test_compact_prose_verdict_is_recovered_by_json_compiler",
+        "line": 1111,
+        "end": 1154,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "novelSpeakV5\\src\\evidence_vault.py",
+    "lines": 119,
+    "definitions": [
+      {
+        "name": "EvidenceVault",
+        "line": 5,
+        "end": 119,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "__init__",
+        "line": 6,
+        "end": 8,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_load_or_init",
+        "line": 10,
+        "end": 17,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "save",
+        "line": 19,
+        "end": 26,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "add_evidence",
+        "line": 28,
+        "end": 56,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "update_last_seen",
+        "line": 58,
+        "end": 70,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "get_active_characters",
+        "line": 72,
+        "end": 78,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "resolve_alias",
+        "line": 80,
+        "end": 86,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "get_state_text",
+        "line": 88,
+        "end": 108,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "get_character",
+        "line": 110,
+        "end": 112,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "has_character",
+        "line": 114,
+        "end": 116,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "all_characters",
+        "line": 118,
+        "end": 119,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "novelSpeakV5\\src\\get_dialogue.py",
+    "lines": 104,
+    "definitions": [
+      {
+        "name": "get_label_count",
+        "line": 16,
+        "end": 21,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "extract_dialogue_with_line_numbers",
+        "line": 24,
+        "end": 33,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "main",
+        "line": 36,
+        "end": 100,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "novelSpeakV5\\src\\labeler.py",
+    "lines": 215,
+    "definitions": [
+      {
+        "name": "LabelerAgent",
+        "line": 79,
+        "end": 215,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "__init__",
+        "line": 80,
+        "end": 83,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "label",
+        "line": 85,
+        "end": 160,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_parse_response",
+        "line": 162,
+        "end": 180,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_clean_name",
+        "line": 182,
+        "end": 197,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_build_prompt",
+        "line": 199,
+        "end": 215,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "novelSpeakV5\\src\\model_client.py",
+    "lines": 120,
+    "definitions": [
+      {
+        "name": "TokenTracker",
+        "line": 7,
+        "end": 96,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "ModelClient",
+        "line": 99,
+        "end": 120,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "__init__",
+        "line": 8,
+        "end": 9,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "new_round",
+        "line": 11,
+        "end": 21,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "log_agent",
+        "line": 23,
+        "end": 35,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "set_result",
+        "line": 37,
+        "end": 43,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "get_total_tokens",
+        "line": 45,
+        "end": 50,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "get_per_agent_total",
+        "line": 52,
+        "end": 59,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "get_agent_call_count",
+        "line": 61,
+        "end": 68,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "print_summary",
+        "line": 70,
+        "end": 88,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "save_log",
+        "line": 90,
+        "end": 96,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "__init__",
+        "line": 100,
+        "end": 103,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "chat",
+        "line": 105,
+        "end": 120,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "novelSpeakV5\\src\\orchestrator.py",
+    "lines": 521,
+    "definitions": [
+      {
+        "name": "_get_novel_lines",
+        "line": 59,
+        "end": 64,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "get_narrative_before",
+        "line": 66,
+        "end": 78,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "detect_rapid_exchange",
+        "line": 80,
+        "end": 82,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "read_novel_lines",
+        "line": 84,
+        "end": 89,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "search_novel",
+        "line": 91,
+        "end": 103,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "deep_search_identity",
+        "line": 105,
+        "end": 144,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "find_all_references",
+        "line": 146,
+        "end": 162,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "get_dialogue_list",
+        "line": 169,
+        "end": 177,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "get_labeled_count",
+        "line": 179,
+        "end": 183,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "write_label",
+        "line": 185,
+        "end": 187,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "build_context_index",
+        "line": 189,
+        "end": 231,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "validate",
+        "line": 238,
+        "end": 297,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "main",
+        "line": 304,
+        "end": 508,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_fmt_time",
+        "line": 511,
+        "end": 517,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "novelSpeakV5\\src\\search_agent.py",
+    "lines": 198,
+    "definitions": [
+      {
+        "name": "SearchAgent",
+        "line": 90,
+        "end": 198,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "__init__",
+        "line": 91,
+        "end": 95,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "investigate",
+        "line": 97,
+        "end": 170,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_parse_result",
+        "line": 172,
+        "end": 187,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "_build_prompt",
+        "line": 189,
+        "end": 198,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "novelSpeakV5\\src\\short_mem.py",
+    "lines": 34,
+    "definitions": [
+      {
+        "name": "ShortMem",
+        "line": 1,
+        "end": 34,
+        "kind": "ClassDef"
+      },
+      {
+        "name": "__init__",
+        "line": 2,
+        "end": 4,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "add",
+        "line": 6,
+        "end": 11,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "get_summary",
+        "line": 13,
+        "end": 20,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "detect_rapid_exchange",
+        "line": 22,
+        "end": 34,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "novelSpeakV5\\src\\validate.py",
+    "lines": 76,
+    "definitions": [
+      {
+        "name": "parse_answers",
+        "line": 23,
+        "end": 29,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "parse_labels",
+        "line": 32,
+        "end": 34,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "main",
+        "line": 37,
+        "end": 72,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "novelSpeakV5\\src\\write_label.py",
+    "lines": 37,
+    "definitions": [
+      {
+        "name": "main",
+        "line": 15,
+        "end": 33,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "tmp\\deepseek_probe\\act_annotate.py",
+    "lines": 166,
+    "definitions": [
+      {
+        "name": "call",
+        "line": 30,
+        "end": 41,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "parse_rich",
+        "line": 44,
+        "end": 54,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "find_acts",
+        "line": 57,
+        "end": 67,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "quote_lines_in",
+        "line": 70,
+        "end": 72,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "main",
+        "line": 75,
+        "end": 162,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "tmp\\deepseek_probe\\baseline_annotate.py",
+    "lines": 211,
+    "definitions": [
+      {
+        "name": "build_inputs",
+        "line": 82,
+        "end": 96,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "read_answers",
+        "line": 99,
+        "end": 101,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "parse_output",
+        "line": 104,
+        "end": 122,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "main",
+        "line": 125,
+        "end": 207,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "tmp\\deepseek_probe\\chunked_multi_turn.py",
+    "lines": 254,
+    "definitions": [
+      {
+        "name": "call",
+        "line": 68,
+        "end": 81,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "run_tool",
+        "line": 84,
+        "end": 90,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "read_answers",
+        "line": 93,
+        "end": 99,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "semantic",
+        "line": 102,
+        "end": 107,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "label_one",
+        "line": 110,
+        "end": 138,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "strict_parse",
+        "line": 141,
+        "end": 152,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "distill",
+        "line": 155,
+        "end": 170,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "main",
+        "line": 173,
+        "end": 250,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "tmp\\deepseek_probe\\collect_baseline.py",
+    "lines": 71,
+    "definitions": [
+      {
+        "name": "main",
+        "line": 15,
+        "end": 67,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "tmp\\deepseek_probe\\cont_agent.py",
+    "lines": 311,
+    "definitions": [
+      {
+        "name": "call",
+        "line": 68,
+        "end": 81,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "run_tool",
+        "line": 84,
+        "end": 90,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "read_answers",
+        "line": 93,
+        "end": 99,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "semantic",
+        "line": 102,
+        "end": 107,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "strict_parse",
+        "line": 114,
+        "end": 129,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "label_one",
+        "line": 132,
+        "end": 162,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "distill",
+        "line": 165,
+        "end": 183,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "ledger_names",
+        "line": 186,
+        "end": 192,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "context_of",
+        "line": 195,
+        "end": 198,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "main",
+        "line": 201,
+        "end": 307,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "tmp\\deepseek_probe\\evidence_annotate.py",
+    "lines": 249,
+    "definitions": [
+      {
+        "name": "call",
+        "line": 69,
+        "end": 81,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "parse_rich",
+        "line": 84,
+        "end": 102,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "parse_plain",
+        "line": 105,
+        "end": 115,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "main",
+        "line": 118,
+        "end": 245,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "tmp\\deepseek_probe\\identity_resolve.py",
+    "lines": 134,
+    "definitions": [
+      {
+        "name": "call",
+        "line": 45,
+        "end": 55,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "read_answers",
+        "line": 58,
+        "end": 64,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "parse_speaker",
+        "line": 67,
+        "end": 76,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "semantic",
+        "line": 79,
+        "end": 83,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "main",
+        "line": 86,
+        "end": 130,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "tmp\\deepseek_probe\\multi_turn_agent.py",
+    "lines": 193,
+    "definitions": [
+      {
+        "name": "call",
+        "line": 65,
+        "end": 78,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "run_tool",
+        "line": 81,
+        "end": 87,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "read_answers",
+        "line": 90,
+        "end": 96,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "semantic",
+        "line": 99,
+        "end": 103,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "main",
+        "line": 106,
+        "end": 189,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "tmp\\deepseek_probe\\normalize_aliases.py",
+    "lines": 131,
+    "definitions": [
+      {
+        "name": "read_answers",
+        "line": 34,
+        "end": 40,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "parse_speaker",
+        "line": 43,
+        "end": 52,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "semantic",
+        "line": 55,
+        "end": 59,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "build_alias_map",
+        "line": 62,
+        "end": 83,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "main",
+        "line": 86,
+        "end": 127,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "tmp\\deepseek_probe\\per_quote.py",
+    "lines": 212,
+    "definitions": [
+      {
+        "name": "call",
+        "line": 64,
+        "end": 77,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "run_tool",
+        "line": 80,
+        "end": 86,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "read_answers",
+        "line": 89,
+        "end": 96,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "semantic",
+        "line": 99,
+        "end": 103,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "main",
+        "line": 106,
+        "end": 208,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "tmp\\deepseek_probe\\pipeline_v1.py",
+    "lines": 192,
+    "definitions": [
+      {
+        "name": "call",
+        "line": 72,
+        "end": 84,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "main",
+        "line": 87,
+        "end": 188,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "tmp\\deepseek_probe\\probe2_reasoning_longctx.py",
+    "lines": 134,
+    "definitions": [
+      {
+        "name": "raw_chat",
+        "line": 21,
+        "end": 41,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "variant",
+        "line": 50,
+        "end": 68,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "stage_nothink",
+        "line": 71,
+        "end": 85,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "stage_long",
+        "line": 88,
+        "end": 121,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "tmp\\deepseek_probe\\probe_dsv4flash.py",
+    "lines": 265,
+    "definitions": [
+      {
+        "name": "load_pool",
+        "line": 24,
+        "end": 32,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "chat",
+        "line": 39,
+        "end": 78,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "usage_of",
+        "line": 81,
+        "end": 88,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "stage_basic",
+        "line": 91,
+        "end": 106,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "stage_tools",
+        "line": 126,
+        "end": 159,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "stage_json",
+        "line": 190,
+        "end": 238,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "main",
+        "line": 241,
+        "end": 261,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "tmp\\deepseek_probe\\quotetype_probe.py",
+    "lines": 173,
+    "definitions": [
+      {
+        "name": "build",
+        "line": 59,
+        "end": 77,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "main",
+        "line": 80,
+        "end": 169,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "tmp\\deepseek_probe\\refine_divergent.py",
+    "lines": 158,
+    "definitions": [
+      {
+        "name": "call",
+        "line": 45,
+        "end": 55,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "parse",
+        "line": 58,
+        "end": 67,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "read_answers",
+        "line": 70,
+        "end": 77,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "semantic",
+        "line": 80,
+        "end": 85,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "main",
+        "line": 88,
+        "end": 154,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "norm",
+        "line": 106,
+        "end": 107,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "tmp\\deepseek_probe\\relabel_nonperson.py",
+    "lines": 185,
+    "definitions": [
+      {
+        "name": "collect",
+        "line": 56,
+        "end": 72,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "call",
+        "line": 75,
+        "end": 91,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "parse",
+        "line": 94,
+        "end": 107,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "main",
+        "line": 110,
+        "end": 181,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "tmp\\deepseek_probe\\score_baseline.py",
+    "lines": 132,
+    "definitions": [
+      {
+        "name": "read_answers",
+        "line": 22,
+        "end": 30,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "speaker_kind",
+        "line": 33,
+        "end": 41,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "main",
+        "line": 57,
+        "end": 128,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "tmp\\deepseek_probe\\selfconsistency.py",
+    "lines": 92,
+    "definitions": [
+      {
+        "name": "read_answers",
+        "line": 23,
+        "end": 29,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "parse_out",
+        "line": 32,
+        "end": 41,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "semantic",
+        "line": 44,
+        "end": 48,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "norm",
+        "line": 51,
+        "end": 52,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "main",
+        "line": 55,
+        "end": 88,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "tmp\\deepseek_probe\\self_refine.py",
+    "lines": 129,
+    "definitions": [
+      {
+        "name": "call",
+        "line": 37,
+        "end": 47,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "read_answers",
+        "line": 50,
+        "end": 56,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "parse_speaker",
+        "line": 59,
+        "end": 68,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "semantic",
+        "line": 71,
+        "end": 75,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "main",
+        "line": 78,
+        "end": 125,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "tmp\\deepseek_probe\\strict_ab_merge.py",
+    "lines": 143,
+    "definitions": [
+      {
+        "name": "call",
+        "line": 43,
+        "end": 54,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "read_answers",
+        "line": 57,
+        "end": 63,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "parse_out",
+        "line": 66,
+        "end": 72,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "parse_speaker",
+        "line": 75,
+        "end": 84,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "semantic",
+        "line": 87,
+        "end": 91,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "main",
+        "line": 94,
+        "end": 139,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "tmp\\deepseek_probe\\taxonomy_consult.py",
+    "lines": 187,
+    "definitions": [
+      {
+        "name": "load_samples",
+        "line": 82,
+        "end": 94,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "stratify",
+        "line": 97,
+        "end": 120,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "call",
+        "line": 123,
+        "end": 137,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "main",
+        "line": 140,
+        "end": 183,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "bucket",
+        "line": 99,
+        "end": 111,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "tmp\\deepseek_probe\\taxonomy_retry.py",
+    "lines": 97,
+    "definitions": [
+      {
+        "name": "raw_call",
+        "line": 18,
+        "end": 31,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "main",
+        "line": 34,
+        "end": 93,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "tmp\\deepseek_probe\\twopass_annotate.py",
+    "lines": 183,
+    "definitions": [
+      {
+        "name": "call",
+        "line": 65,
+        "end": 79,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "build",
+        "line": 82,
+        "end": 91,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "parse_labels",
+        "line": 94,
+        "end": 103,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "main",
+        "line": 106,
+        "end": 179,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "tmp\\refactor_prep\\analyze_vol45_attribution.py",
+    "lines": 231,
+    "definitions": [
+      {
+        "name": "read_answers",
+        "line": 32,
+        "end": 42,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "read_labels",
+        "line": 45,
+        "end": 46,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "label_parts",
+        "line": 49,
+        "end": 50,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "speaker_kind",
+        "line": 53,
+        "end": 61,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "semantic",
+        "line": 77,
+        "end": 82,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "build_quote_index",
+        "line": 85,
+        "end": 95,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "main",
+        "line": 98,
+        "end": 227,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "tmp\\refactor_prep\\build_layered_eval.py",
+    "lines": 170,
+    "definitions": [
+      {
+        "name": "read_answers",
+        "line": 30,
+        "end": 38,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "read_labels",
+        "line": 41,
+        "end": 42,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "parse_baseline",
+        "line": 45,
+        "end": 57,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "semantic",
+        "line": 60,
+        "end": 65,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "category",
+        "line": 68,
+        "end": 89,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "main",
+        "line": 92,
+        "end": 166,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "kind",
+        "line": 69,
+        "end": 77,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "tmp\\refactor_prep\\build_run_manifest.py",
+    "lines": 115,
+    "definitions": [
+      {
+        "name": "sha256",
+        "line": 26,
+        "end": 31,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "git",
+        "line": 34,
+        "end": 39,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "main",
+        "line": 42,
+        "end": 111,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "tmp\\refactor_prep\\citation_verification.py",
+    "lines": 127,
+    "definitions": [
+      {
+        "name": "read_answers",
+        "line": 32,
+        "end": 38,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "parse_rich",
+        "line": 41,
+        "end": 55,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "line_supports",
+        "line": 58,
+        "end": 64,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "main",
+        "line": 67,
+        "end": 123,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "tmp\\refactor_prep\\ensemble_majority.py",
+    "lines": 120,
+    "definitions": [
+      {
+        "name": "read_answers",
+        "line": 28,
+        "end": 34,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "parse_out",
+        "line": 37,
+        "end": 46,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "semantic",
+        "line": 49,
+        "end": 53,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "norm_label",
+        "line": 56,
+        "end": 57,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "main",
+        "line": 60,
+        "end": 116,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "tmp\\refactor_prep\\explicit_attribution.py",
+    "lines": 198,
+    "definitions": [
+      {
+        "name": "names_in",
+        "line": 36,
+        "end": 47,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "explicit_attribution",
+        "line": 50,
+        "end": 84,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "read_answers",
+        "line": 87,
+        "end": 95,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "parse_out",
+        "line": 98,
+        "end": 107,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "read_labels",
+        "line": 110,
+        "end": 111,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "main",
+        "line": 114,
+        "end": 194,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "stats",
+        "line": 154,
+        "end": 167,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "tmp\\refactor_prep\\nonperson_marker_rule.py",
+    "lines": 103,
+    "definitions": [
+      {
+        "name": "is_nonperson",
+        "line": 38,
+        "end": 39,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "rule_hit",
+        "line": 42,
+        "end": 47,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "main",
+        "line": 50,
+        "end": 99,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "tmp\\refactor_prep\\profile_nonperson.py",
+    "lines": 133,
+    "definitions": [
+      {
+        "name": "extract",
+        "line": 23,
+        "end": 45,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "classify",
+        "line": 48,
+        "end": 69,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "main",
+        "line": 72,
+        "end": 129,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "tmp\\refactor_prep\\rescoring_dual_convention.py",
+    "lines": 160,
+    "definitions": [
+      {
+        "name": "read_answers",
+        "line": 28,
+        "end": 36,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "parse_out",
+        "line": 39,
+        "end": 48,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "read_labels",
+        "line": 51,
+        "end": 52,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "semantic",
+        "line": 55,
+        "end": 59,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "main",
+        "line": 62,
+        "end": 156,
+        "kind": "FunctionDef"
+      }
+    ]
+  },
+  {
+    "path": "tmp\\refactor_prep\\score_layered.py",
+    "lines": 152,
+    "definitions": [
+      {
+        "name": "read_answers",
+        "line": 30,
+        "end": 37,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "read_labels",
+        "line": 40,
+        "end": 41,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "parse_out",
+        "line": 44,
+        "end": 53,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "semantic",
+        "line": 56,
+        "end": 60,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "load_strata",
+        "line": 63,
+        "end": 75,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "main",
+        "line": 78,
+        "end": 148,
+        "kind": "FunctionDef"
+      },
+      {
+        "name": "resolve",
+        "line": 92,
+        "end": 107,
+        "kind": "FunctionDef"
+      }
+    ]
+  }
+]

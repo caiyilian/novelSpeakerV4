@@ -22,3 +22,16 @@ _verify*.py
 _pr_body.md
 _issue_body.md
 _release_notes.md
+
+# Temp / experiment scratch dir (scripts migrated to annotator/, outputs archived by date)
+tmp/
+
+# Experiment outputs (results are date-archived, not committed)
+annotator/results/
+annotator/*.ckpt.json
+annotator/__pycache__/
+
+# Tool-local dirs
+.workbuddy/
+.codebase-memory/
+.omo/
