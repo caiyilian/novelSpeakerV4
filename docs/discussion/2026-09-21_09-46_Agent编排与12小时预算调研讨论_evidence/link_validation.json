@@ -1,0 +1,647 @@
+[
+  {
+    "url": "https://developers.openai.com/api/docs/guides/compaction",
+    "ok": true,
+    "checked_at": "2026-09-21T01:44:36.673715+00:00",
+    "attempts": [
+      {
+        "route": "proxy",
+        "status": 200,
+        "final_url": "https://developers.openai.com/api/docs/guides/compaction",
+        "bytes": 454667,
+        "seconds": 2.38,
+        "suspicious_page": false
+      }
+    ]
+  },
+  {
+    "url": "https://github.com/Flesymeb/HarnessOfHarness",
+    "ok": true,
+    "checked_at": "2026-09-21T01:44:36.950598+00:00",
+    "attempts": [
+      {
+        "route": "proxy",
+        "status": 200,
+        "final_url": "https://github.com/Flesymeb/HarnessOfHarness",
+        "bytes": 289875,
+        "seconds": 2.66,
+        "suspicious_page": false
+      }
+    ]
+  },
+  {
+    "url": "https://github.com/Flesymeb/HarnessOfHarness/blob/c0ee1fd362ecaff67e614ad16b492b3d1f1ac6c1/README.md#L1",
+    "ok": true,
+    "checked_at": "2026-09-21T01:44:36.936616+00:00",
+    "attempts": [
+      {
+        "route": "proxy",
+        "status": 200,
+        "final_url": "https://github.com/Flesymeb/HarnessOfHarness/blob/c0ee1fd362ecaff67e614ad16b492b3d1f1ac6c1/README.md",
+        "bytes": 301003,
+        "seconds": 2.64,
+        "suspicious_page": false
+      }
+    ]
+  },
+  {
+    "url": "https://github.com/OpenHands/software-agent-sdk",
+    "ok": true,
+    "checked_at": "2026-09-21T01:44:37.230071+00:00",
+    "attempts": [
+      {
+        "route": "proxy",
+        "status": 200,
+        "final_url": "https://github.com/OpenHands/software-agent-sdk",
+        "bytes": 370384,
+        "seconds": 2.89,
+        "suspicious_page": false
+      }
+    ]
+  },
+  {
+    "url": "https://github.com/OpenHands/software-agent-sdk/blob/856d99d48e4b11c70c5f1cab21e7830570dbc324/openhands-sdk/openhands/sdk/context/condenser/llm_summarizing_condenser.py#L249",
+    "ok": true,
+    "checked_at": "2026-09-21T01:44:37.314654+00:00",
+    "attempts": [
+      {
+        "route": "proxy",
+        "status": 200,
+        "final_url": "https://github.com/OpenHands/software-agent-sdk/blob/856d99d48e4b11c70c5f1cab21e7830570dbc324/openhands-sdk/openhands/sdk/context/condenser/llm_summarizing_condenser.py",
+        "bytes": 561937,
+        "seconds": 2.95,
+        "suspicious_page": false
+      }
+    ]
+  },
+  {
+    "url": "https://github.com/Opencode-DCP/opencode-dynamic-context-pruning",
+    "ok": true,
+    "checked_at": "2026-09-21T01:44:38.922979+00:00",
+    "attempts": [
+      {
+        "route": "proxy",
+        "status": 200,
+        "final_url": "https://github.com/Tarquinen/opencode-dynamic-context-pruning",
+        "bytes": 368694,
+        "seconds": 4.55,
+        "suspicious_page": false
+      }
+    ]
+  },
+  {
+    "url": "https://github.com/Opencode-DCP/opencode-dynamic-context-pruning/blob/d637981555a18c3992472268a0657a948925d5fa/LICENSE#L1",
+    "ok": true,
+    "checked_at": "2026-09-21T01:44:41.230318+00:00",
+    "attempts": [
+      {
+        "route": "proxy",
+        "status": 200,
+        "final_url": "https://github.com/Tarquinen/opencode-dynamic-context-pruning/blob/d637981555a18c3992472268a0657a948925d5fa/LICENSE",
+        "bytes": 502213,
+        "seconds": 4.56,
+        "suspicious_page": false
+      }
+    ]
+  },
+  {
+    "url": "https://github.com/Opencode-DCP/opencode-dynamic-context-pruning/blob/d637981555a18c3992472268a0657a948925d5fa/lib/strategies/deduplication.ts#L12",
+    "ok": true,
+    "checked_at": "2026-09-21T01:44:41.154807+00:00",
+    "attempts": [
+      {
+        "route": "proxy",
+        "status": 200,
+        "final_url": "https://github.com/Tarquinen/opencode-dynamic-context-pruning/blob/d637981555a18c3992472268a0657a948925d5fa/lib/strategies/deduplication.ts",
+        "bytes": 317969,
+        "seconds": 4.22,
+        "suspicious_page": false
+      }
+    ]
+  },
+  {
+    "url": "https://github.com/agno-agi/agno",
+    "ok": true,
+    "checked_at": "2026-09-21T01:44:39.708437+00:00",
+    "attempts": [
+      {
+        "route": "proxy",
+        "status": 200,
+        "final_url": "https://github.com/agno-agi/agno",
+        "bytes": 309801,
+        "seconds": 2.75,
+        "suspicious_page": false
+      }
+    ]
+  },
+  {
+    "url": "https://github.com/agno-agi/agno/blob/dc86cf20d254efea68fb03784c38264d08a86908/libs/agno/agno/team/_default_tools.py#L128",
+    "ok": true,
+    "checked_at": "2026-09-21T01:44:40.423291+00:00",
+    "attempts": [
+      {
+        "route": "proxy",
+        "status": 200,
+        "final_url": "https://github.com/agno-agi/agno/blob/dc86cf20d254efea68fb03784c38264d08a86908/libs/agno/agno/team/_default_tools.py",
+        "bytes": 974492,
+        "seconds": 3.19,
+        "suspicious_page": false
+      }
+    ]
+  },
+  {
+    "url": "https://github.com/anomalyco/opencode",
+    "ok": true,
+    "checked_at": "2026-09-21T01:44:40.195984+00:00",
+    "attempts": [
+      {
+        "route": "proxy",
+        "status": 200,
+        "final_url": "https://github.com/anomalyco/opencode",
+        "bytes": 417615,
+        "seconds": 2.88,
+        "suspicious_page": false
+      }
+    ]
+  },
+  {
+    "url": "https://github.com/anomalyco/opencode/blob/17b76788754736b118fa6779a02936286f66aa61/packages/core/src/session/compaction.ts#L145",
+    "ok": true,
+    "checked_at": "2026-09-21T01:44:41.548337+00:00",
+    "attempts": [
+      {
+        "route": "proxy",
+        "status": 200,
+        "final_url": "https://github.com/anomalyco/opencode/blob/17b76788754736b118fa6779a02936286f66aa61/packages/core/src/session/compaction.ts",
+        "bytes": 435524,
+        "seconds": 2.62,
+        "suspicious_page": false
+      }
+    ]
+  },
+  {
+    "url": "https://github.com/bytedance/deer-flow",
+    "ok": true,
+    "checked_at": "2026-09-21T01:44:43.338477+00:00",
+    "attempts": [
+      {
+        "route": "proxy",
+        "status": 200,
+        "final_url": "https://github.com/bytedance/deer-flow",
+        "bytes": 1019580,
+        "seconds": 3.62,
+        "suspicious_page": false
+      }
+    ]
+  },
+  {
+    "url": "https://github.com/bytedance/deer-flow/blob/29d285731b326a728a9df33d3641f73b68bbe48b/backend/packages/harness/deerflow/subagents/executor.py#L1357",
+    "ok": true,
+    "checked_at": "2026-09-21T01:44:43.512074+00:00",
+    "attempts": [
+      {
+        "route": "proxy",
+        "status": 200,
+        "final_url": "https://github.com/bytedance/deer-flow/blob/29d285731b326a728a9df33d3641f73b68bbe48b/backend/packages/harness/deerflow/subagents/executor.py",
+        "bytes": 1000086,
+        "seconds": 3.33,
+        "suspicious_page": false
+      }
+    ]
+  },
+  {
+    "url": "https://github.com/code-yeongyu/lazycodex",
+    "ok": true,
+    "checked_at": "2026-09-21T01:44:43.026619+00:00",
+    "attempts": [
+      {
+        "route": "proxy",
+        "status": 200,
+        "final_url": "https://github.com/code-yeongyu/lazycodex",
+        "bytes": 344255,
+        "seconds": 2.61,
+        "suspicious_page": false
+      }
+    ]
+  },
+  {
+    "url": "https://github.com/code-yeongyu/lazycodex/blob/1372b0124688b792b8f04618bf72aa08a8d0aa46/plugins/omo/components/ulw-loop/src/goal-status.ts#L1",
+    "ok": true,
+    "checked_at": "2026-09-21T01:44:43.748045+00:00",
+    "attempts": [
+      {
+        "route": "proxy",
+        "status": 200,
+        "final_url": "https://github.com/code-yeongyu/lazycodex/blob/1372b0124688b792b8f04618bf72aa08a8d0aa46/plugins/omo/components/ulw-loop/src/goal-status.ts",
+        "bytes": 331906,
+        "seconds": 2.59,
+        "suspicious_page": false
+      }
+    ]
+  },
+  {
+    "url": "https://github.com/deepseek-ai/deepseek-harness",
+    "ok": true,
+    "checked_at": "2026-09-21T01:44:44.084559+00:00",
+    "attempts": [
+      {
+        "route": "proxy",
+        "status": 200,
+        "final_url": "https://github.com/deepseek-ai/deepseek-harness",
+        "bytes": 399110,
+        "seconds": 2.84,
+        "suspicious_page": false
+      }
+    ]
+  },
+  {
+    "url": "https://github.com/deepseek-ai/deepseek-harness/blob/ddefc45fbc7f8e46dd73185e68295696d1297887/packages/compaction/compaction-basic/src/region.ts#L221",
+    "ok": true,
+    "checked_at": "2026-09-21T01:44:44.373594+00:00",
+    "attempts": [
+      {
+        "route": "proxy",
+        "status": 200,
+        "final_url": "https://github.com/deepseek-ai/deepseek-harness/blob/ddefc45fbc7f8e46dd73185e68295696d1297887/packages/compaction/compaction-basic/src/region.ts",
+        "bytes": 635116,
+        "seconds": 2.83,
+        "suspicious_page": false
+      }
+    ]
+  },
+  {
+    "url": "https://github.com/deepseek-ai/deepseek-harness/blob/ddefc45fbc7f8e46dd73185e68295696d1297887/packages/compaction/compaction-basic/src/region.ts#L472",
+    "ok": true,
+    "checked_at": "2026-09-21T01:44:46.816079+00:00",
+    "attempts": [
+      {
+        "route": "proxy",
+        "status": 200,
+        "final_url": "https://github.com/deepseek-ai/deepseek-harness/blob/ddefc45fbc7f8e46dd73185e68295696d1297887/packages/compaction/compaction-basic/src/region.ts",
+        "bytes": 635115,
+        "seconds": 3.78,
+        "suspicious_page": false
+      }
+    ]
+  },
+  {
+    "url": "https://github.com/earendil-works/pi",
+    "ok": true,
+    "checked_at": "2026-09-21T01:44:46.295214+00:00",
+    "attempts": [
+      {
+        "route": "proxy",
+        "status": 200,
+        "final_url": "https://github.com/earendil-works/pi",
+        "bytes": 341728,
+        "seconds": 2.95,
+        "suspicious_page": false
+      }
+    ]
+  },
+  {
+    "url": "https://github.com/earendil-works/pi/blob/890f920884f6d21fc7617d236ef9e1cc5d7a0ef8/packages/coding-agent/src/core/compaction/compaction.ts#L418",
+    "ok": true,
+    "checked_at": "2026-09-21T01:44:46.949743+00:00",
+    "attempts": [
+      {
+        "route": "proxy",
+        "status": 200,
+        "final_url": "https://github.com/earendil-works/pi/blob/890f920884f6d21fc7617d236ef9e1cc5d7a0ef8/packages/coding-agent/src/core/compaction/compaction.ts",
+        "bytes": 860717,
+        "seconds": 3.44,
+        "suspicious_page": false
+      }
+    ]
+  },
+  {
+    "url": "https://github.com/langchain-ai/deepagents",
+    "ok": true,
+    "checked_at": "2026-09-21T01:44:46.656738+00:00",
+    "attempts": [
+      {
+        "route": "proxy",
+        "status": 200,
+        "final_url": "https://github.com/langchain-ai/deepagents",
+        "bytes": 334292,
+        "seconds": 2.91,
+        "suspicious_page": false
+      }
+    ]
+  },
+  {
+    "url": "https://github.com/langchain-ai/deepagents/blob/a764619aa8c850bc75e2e916cf53a587637d8c81/libs/deepagents/deepagents/graph.py#L271",
+    "ok": true,
+    "checked_at": "2026-09-21T01:44:47.086442+00:00",
+    "attempts": [
+      {
+        "route": "proxy",
+        "status": 200,
+        "final_url": "https://github.com/langchain-ai/deepagents/blob/a764619aa8c850bc75e2e916cf53a587637d8c81/libs/deepagents/deepagents/graph.py",
+        "bytes": 789512,
+        "seconds": 3.0,
+        "suspicious_page": false
+      }
+    ]
+  },
+  {
+    "url": "https://github.com/langchain-ai/deepagents/blob/a764619aa8c850bc75e2e916cf53a587637d8c81/libs/deepagents/deepagents/middleware/subagents.py#L581",
+    "ok": true,
+    "checked_at": "2026-09-21T01:44:47.570419+00:00",
+    "attempts": [
+      {
+        "route": "proxy",
+        "status": 200,
+        "final_url": "https://github.com/langchain-ai/deepagents/blob/a764619aa8c850bc75e2e916cf53a587637d8c81/libs/deepagents/deepagents/middleware/subagents.py",
+        "bytes": 828180,
+        "seconds": 3.19,
+        "suspicious_page": false
+      }
+    ]
+  },
+  {
+    "url": "https://github.com/langchain-ai/deepagents/blob/a764619aa8c850bc75e2e916cf53a587637d8c81/libs/deepagents/deepagents/middleware/summarization.py#L1289",
+    "ok": true,
+    "checked_at": "2026-09-21T01:44:49.686830+00:00",
+    "attempts": [
+      {
+        "route": "proxy",
+        "status": 200,
+        "final_url": "https://github.com/langchain-ai/deepagents/blob/a764619aa8c850bc75e2e916cf53a587637d8c81/libs/deepagents/deepagents/middleware/summarization.py",
+        "bytes": 956224,
+        "seconds": 3.39,
+        "suspicious_page": false
+      }
+    ]
+  },
+  {
+    "url": "https://github.com/langchain-ai/langchain",
+    "ok": true,
+    "checked_at": "2026-09-21T01:44:49.703448+00:00",
+    "attempts": [
+      {
+        "route": "proxy",
+        "status": 200,
+        "final_url": "https://github.com/langchain-ai/langchain",
+        "bytes": 316876,
+        "seconds": 3.05,
+        "suspicious_page": false
+      }
+    ]
+  },
+  {
+    "url": "https://github.com/langchain-ai/langchain/blob/4af7ab8fcb98c2dc211d9e34cddedffa23eba4d9/libs/langchain_v1/langchain/agents/factory.py#L840",
+    "ok": true,
+    "checked_at": "2026-09-21T01:44:50.017443+00:00",
+    "attempts": [
+      {
+        "route": "proxy",
+        "status": 200,
+        "final_url": "https://github.com/langchain-ai/langchain/blob/4af7ab8fcb98c2dc211d9e34cddedffa23eba4d9/libs/langchain_v1/langchain/agents/factory.py",
+        "bytes": 935367,
+        "seconds": 3.2,
+        "suspicious_page": false
+      }
+    ]
+  },
+  {
+    "url": "https://github.com/langchain-ai/langchain/blob/4af7ab8fcb98c2dc211d9e34cddedffa23eba4d9/libs/langchain_v1/langchain/agents/structured_output.py#L192",
+    "ok": true,
+    "checked_at": "2026-09-21T01:44:49.642774+00:00",
+    "attempts": [
+      {
+        "route": "proxy",
+        "status": 200,
+        "final_url": "https://github.com/langchain-ai/langchain/blob/4af7ab8fcb98c2dc211d9e34cddedffa23eba4d9/libs/langchain_v1/langchain/agents/structured_output.py",
+        "bytes": 526034,
+        "seconds": 2.69,
+        "suspicious_page": false
+      }
+    ]
+  },
+  {
+    "url": "https://github.com/langchain-ai/langgraph",
+    "ok": true,
+    "checked_at": "2026-09-21T01:44:49.626749+00:00",
+    "attempts": [
+      {
+        "route": "proxy",
+        "status": 200,
+        "final_url": "https://github.com/langchain-ai/langgraph",
+        "bytes": 302982,
+        "seconds": 2.55,
+        "suspicious_page": false
+      }
+    ]
+  },
+  {
+    "url": "https://github.com/langchain-ai/langgraph/blob/ed384f3a124660db6dccd6c53eaad48e1457e0b5/libs/checkpoint-sqlite/langgraph/checkpoint/sqlite/__init__.py#L387",
+    "ok": true,
+    "checked_at": "2026-09-21T01:44:50.619419+00:00",
+    "attempts": [
+      {
+        "route": "proxy",
+        "status": 200,
+        "final_url": "https://github.com/langchain-ai/langgraph/blob/ed384f3a124660db6dccd6c53eaad48e1457e0b5/libs/checkpoint-sqlite/langgraph/checkpoint/sqlite/__init__.py",
+        "bytes": 612899,
+        "seconds": 3.05,
+        "suspicious_page": false
+      }
+    ]
+  },
+  {
+    "url": "https://github.com/letta-ai/letta",
+    "ok": true,
+    "checked_at": "2026-09-21T01:44:52.278243+00:00",
+    "attempts": [
+      {
+        "route": "proxy",
+        "status": 200,
+        "final_url": "https://github.com/letta-ai/letta",
+        "bytes": 269907,
+        "seconds": 2.66,
+        "suspicious_page": false
+      }
+    ]
+  },
+  {
+    "url": "https://github.com/letta-ai/letta-code",
+    "ok": true,
+    "checked_at": "2026-09-21T01:44:52.520438+00:00",
+    "attempts": [
+      {
+        "route": "proxy",
+        "status": 200,
+        "final_url": "https://github.com/letta-ai/letta-code",
+        "bytes": 365703,
+        "seconds": 2.88,
+        "suspicious_page": false
+      }
+    ]
+  },
+  {
+    "url": "https://github.com/letta-ai/letta-code/blob/fb34d2023b6eca8c816134b3dab55b1bf317f52d/src/backend/local/local-backend.ts#L869",
+    "ok": true,
+    "checked_at": "2026-09-21T01:44:52.672400+00:00",
+    "attempts": [
+      {
+        "route": "proxy",
+        "status": 200,
+        "final_url": "https://github.com/letta-ai/letta-code/blob/fb34d2023b6eca8c816134b3dab55b1bf317f52d/src/backend/local/local-backend.ts",
+        "bytes": 929542,
+        "seconds": 2.98,
+        "suspicious_page": false
+      }
+    ]
+  },
+  {
+    "url": "https://github.com/letta-ai/letta/blob/5bcdd177d70fa2b31a754cfcd801e77b2e1ab16a/README.md#L1",
+    "ok": true,
+    "checked_at": "2026-09-21T01:44:53.170829+00:00",
+    "attempts": [
+      {
+        "route": "proxy",
+        "status": 200,
+        "final_url": "https://github.com/letta-ai/letta/blob/5bcdd177d70fa2b31a754cfcd801e77b2e1ab16a/README.md",
+        "bytes": 240888,
+        "seconds": 3.47,
+        "suspicious_page": false
+      }
+    ]
+  },
+  {
+    "url": "https://github.com/mastra-ai/mastra",
+    "ok": true,
+    "checked_at": "2026-09-21T01:44:52.691326+00:00",
+    "attempts": [
+      {
+        "route": "proxy",
+        "status": 200,
+        "final_url": "https://github.com/mastra-ai/mastra",
+        "bytes": 424398,
+        "seconds": 2.67,
+        "suspicious_page": false
+      }
+    ]
+  },
+  {
+    "url": "https://github.com/mastra-ai/mastra/blob/ad9e51e842d5e326a40f6271f64b7b6e58f5d252/LICENSE.md#L1",
+    "ok": true,
+    "checked_at": "2026-09-21T01:44:53.239547+00:00",
+    "attempts": [
+      {
+        "route": "proxy",
+        "status": 200,
+        "final_url": "https://github.com/mastra-ai/mastra/blob/ad9e51e842d5e326a40f6271f64b7b6e58f5d252/LICENSE.md",
+        "bytes": 238060,
+        "seconds": 2.62,
+        "suspicious_page": false
+      }
+    ]
+  },
+  {
+    "url": "https://github.com/mastra-ai/mastra/blob/ad9e51e842d5e326a40f6271f64b7b6e58f5d252/packages/memory/src/processors/observational-memory/observation-strategies/async-buffer.ts#L59",
+    "ok": true,
+    "checked_at": "2026-09-21T01:44:54.952522+00:00",
+    "attempts": [
+      {
+        "route": "proxy",
+        "status": 200,
+        "final_url": "https://github.com/mastra-ai/mastra/blob/ad9e51e842d5e326a40f6271f64b7b6e58f5d252/packages/memory/src/processors/observational-memory/observation-strategies/async-buffer.ts",
+        "bytes": 458206,
+        "seconds": 2.67,
+        "suspicious_page": false
+      }
+    ]
+  },
+  {
+    "url": "https://github.com/openai/codex",
+    "ok": true,
+    "checked_at": "2026-09-21T01:44:55.120707+00:00",
+    "attempts": [
+      {
+        "route": "proxy",
+        "status": 200,
+        "final_url": "https://github.com/openai/codex",
+        "bytes": 362506,
+        "seconds": 2.61,
+        "suspicious_page": false
+      }
+    ]
+  },
+  {
+    "url": "https://github.com/openai/codex/blob/75db67bbc6a18200b52698c8870adaedd7746dea/codex-rs/core/src/compact.rs#L687",
+    "ok": true,
+    "checked_at": "2026-09-21T01:44:55.685514+00:00",
+    "attempts": [
+      {
+        "route": "proxy",
+        "status": 200,
+        "final_url": "https://github.com/openai/codex/blob/75db67bbc6a18200b52698c8870adaedd7746dea/codex-rs/core/src/compact.rs",
+        "bytes": 824852,
+        "seconds": 3.02,
+        "suspicious_page": false
+      }
+    ]
+  },
+  {
+    "url": "https://github.com/pydantic/pydantic-ai",
+    "ok": true,
+    "checked_at": "2026-09-21T01:44:55.547511+00:00",
+    "attempts": [
+      {
+        "route": "proxy",
+        "status": 200,
+        "final_url": "https://github.com/pydantic/pydantic-ai",
+        "bytes": 439471,
+        "seconds": 2.86,
+        "suspicious_page": false
+      }
+    ]
+  },
+  {
+    "url": "https://github.com/pydantic/pydantic-ai/blob/c4898abb54dc25ae6f6aef208a4c0661b30a455e/pydantic_ai_slim/pydantic_ai/capabilities/process_history.py#L26",
+    "ok": true,
+    "checked_at": "2026-09-21T01:44:55.737174+00:00",
+    "attempts": [
+      {
+        "route": "proxy",
+        "status": 200,
+        "final_url": "https://github.com/pydantic/pydantic-ai/blob/c4898abb54dc25ae6f6aef208a4c0661b30a455e/pydantic_ai_slim/pydantic_ai/capabilities/process_history.py",
+        "bytes": 281553,
+        "seconds": 2.56,
+        "suspicious_page": false
+      }
+    ]
+  },
+  {
+    "url": "https://github.com/pydantic/pydantic-ai/blob/c4898abb54dc25ae6f6aef208a4c0661b30a455e/pydantic_ai_slim/pydantic_ai/output.py#L214",
+    "ok": true,
+    "checked_at": "2026-09-21T01:44:56.047012+00:00",
+    "attempts": [
+      {
+        "route": "proxy",
+        "status": 200,
+        "final_url": "https://github.com/pydantic/pydantic-ai/blob/c4898abb54dc25ae6f6aef208a4c0661b30a455e/pydantic_ai_slim/pydantic_ai/output.py",
+        "bytes": 652084,
+        "seconds": 2.81,
+        "suspicious_page": false
+      }
+    ]
+  },
+  {
+    "url": "https://github.com/pydantic/pydantic-ai/blob/c4898abb54dc25ae6f6aef208a4c0661b30a455e/pydantic_ai_slim/pydantic_ai/usage.py#L446",
+    "ok": true,
+    "checked_at": "2026-09-21T01:44:58.128323+00:00",
+    "attempts": [
+      {
+        "route": "proxy",
+        "status": 200,
+        "final_url": "https://github.com/pydantic/pydantic-ai/blob/c4898abb54dc25ae6f6aef208a4c0661b30a455e/pydantic_ai_slim/pydantic_ai/usage.py",
+        "bytes": 648646,
+        "seconds": 3.17,
+        "suspicious_page": false
+      }
+    ]
+  }
+]
