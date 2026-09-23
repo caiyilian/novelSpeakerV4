@@ -103,8 +103,15 @@ def read_answers(path):
 
 
 def semantic(parts, label, identities):
+    # Normalize the non-person label on BOTH sides to one internal enum.
+    # Bug fixed 2026-09-23: this used to map only the OUTPUT side's
+    # 无人称引语 -> 非人物发声, while the revised answers.txt uses 无人称引语;
+    # run_label.NON_PERSON_ALIASES does not contain 无人称引语 either, so
+    # answer=无人称引语 & output=无人称引语 was scored WRONG (56 quotes undercounted).
+    NP = {"无人称引语", "非人物发声", "非人物"}
     p = {x.strip() for x in label.split("|") if x.strip()}
-    p = {"非人物发声" if x == "无人称引语" else x for x in p}
+    p = {"非人物发声" if x in NP else x for x in p}
+    parts = {"非人物发声" if x in NP else x for x in parts}
     if parts & p:
         return True
     return rl._validation_lenient_match(parts, p, verified_identities=identities)[0]
