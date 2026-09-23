@@ -1938,6 +1938,9 @@ NON_PERSON_ALIASES = {
     "拟声",
     "非人物",
     "非人物发声",
+    # 2026-09-23: the project's revised answers use this spelling; it must be a
+    # recognized alias or "answer=无人称引语 & output=无人称引语" scores wrong.
+    "无人称引语",
 }
 
 
