@@ -67,10 +67,12 @@ def main():
     errs = [i for i, a in enumerate(raw, 1)
             if not sf.match(set(a), out.get(i, ""), ident)]
     multi = [i for i, a in enumerate(raw, 1) if len(a) > 1]
-    # split multi-label into auto-resolvable (unique canonical in set) vs needs-decision
+    # A2: multi-label items that are NOT already in A1 (avoid duplicates)
     auto_res = {}
     need_dec = []
     for i in multi:
+        if i in errs:
+            continue          # already listed in A1
         hit = [x for x in raw[i - 1] if x in canon]
         if len(hit) == 1:
             auto_res[i] = hit[0]
